@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: woopulse-postgres
+    environment:
+      POSTGRES_USER: woopulse
+      POSTGRES_PASSWORD: woopulse
+      POSTGRES_DB: woopulse
+    ports:
+      - "5432:5432"
+    volumes:
+      - woopulse_pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U woopulse -d woopulse"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  woopulse_pgdata:
