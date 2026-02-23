@@ -10,7 +10,8 @@ export default function Home() {
   const [stores, setStores] = useState<Store[]>([]);
   const [name, setName] = useState("StoreFromUI");
   const [busy, setBusy] = useState(false);
-
+  const [auth, setAuth] = useState<{ loggedIn: boolean; name?: string; email?: string; sub?: string } | null>(null);
+  
   async function load() {
     const [h, s] = await Promise.all([
       fetch("http://localhost:5113/health", { cache: "no-store" }).then(r => r.json()),
@@ -45,8 +46,37 @@ export default function Home() {
     }
   }
 
+  useEffect(() => {
+    fetch("/api/profile")
+      .then(r => r.json())
+      .then(setAuth)
+      .catch(() => setAuth({ loggedIn: false }));
+  }, []);
+
   return (
     <main style={{ padding: 24, fontFamily: "system-ui" }}>
+      
+      <section style={{ marginBottom: 16 }}>
+        <h2>Auth</h2>
+
+        {auth?.loggedIn ? (
+          <div>
+            <div>Logged in ✅</div>
+            <div><b>Name:</b> {auth.name ?? "(no name)"}</div>
+            <div><b>Email:</b> {auth.email ?? "(no email)"}</div>
+            <div style={{ fontSize: 12, opacity: 0.8 }}><b>sub:</b> {auth.sub}</div>
+            <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
+              <a href="/auth/logout">Logout</a>
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: "flex", gap: 8 }}>
+            <span>Logged out ❌</span>
+            <a href="/auth/login">Login</a>
+          </div>
+        )}
+      </section>
+
       <h1>WooPulse</h1>
 
       <h2>API health</h2>

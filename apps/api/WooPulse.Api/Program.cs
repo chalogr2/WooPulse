@@ -2,6 +2,8 @@ using Hangfire;
 using Hangfire.PostgreSql;
 using Microsoft.EntityFrameworkCore;
 using WooPulse.Api.Data;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -41,6 +43,26 @@ builder.Services.AddCors(options =>
     });
 });
 
+builder.Services
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        var domain = builder.Configuration["Auth0:Domain"]
+            ?? throw new InvalidOperationException("Missing Auth0:Domain in appsettings.json");
+
+        var audience = builder.Configuration["Auth0:Audience"]
+            ?? throw new InvalidOperationException("Missing Auth0:Audience in appsettings.json");
+
+        options.Authority = $"https://{domain}/";
+        options.Audience = audience;
+
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+        };
+    });
+
+builder.Services.AddAuthorization();
 builder.Services.AddHangfireServer();
 
 var app = builder.Build();
@@ -48,6 +70,9 @@ var app = builder.Build();
 app.UseCors("LocalDev");
 
 app.UseHangfireDashboard(builder.Configuration["Hangfire:DashboardPath"] ?? "/hangfire");
+
+app.UseAuthentication();
+app.UseAuthorization();
 
 // smoke test background job
 RecurringJob.AddOrUpdate(
@@ -94,6 +119,17 @@ app.MapGet("/stores", async (AppDbContext db) =>
 })
 .WithName("ListStores");
 
+app.MapGet("/me", (HttpContext ctx) =>
+{
+    return Results.Ok(new
+    {
+        name = ctx.User.Identity?.Name,
+        claims = ctx.User.Claims.Select(c => new { c.Type, c.Value })
+    });
+})
+.RequireAuthorization()
+.WithName("Me");
+
 app.MapPost("/stores", async (CreateStoreRequest req, AppDbContext db) =>
 {
     var store = new Store
@@ -107,6 +143,7 @@ app.MapPost("/stores", async (CreateStoreRequest req, AppDbContext db) =>
 
     return Results.Created($"/stores/{store.Id}", store);
 })
+.RequireAuthorization()   
 .WithName("CreateStore");
 
 app.MapGet("/health", () =>
@@ -118,6 +155,9 @@ app.MapGet("/health", () =>
     });
 })
 .WithName("Health");
+
+app.MapGet("/", () => Results.Ok(new { name = "WooPulse API", status = "running" }))
+   .WithName("Root");
 
 app.Run();
 
