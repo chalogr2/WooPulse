@@ -8,11 +8,11 @@ using Microsoft.AspNetCore.Authorization;
 using System.Security.Claims;
 using WooPulse.Api.Dtos;
 using WooPulse.Api.Validation;
+using WooPulse.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
+// Container services
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
@@ -25,20 +25,6 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 var connString = builder.Configuration.GetConnectionString("HangfireDb")
     ?? throw new InvalidOperationException("Missing ConnectionStrings:HangfireDb in appsettings.json");
 
-static StoreDto ToDto(Store s) =>
-    new(
-        s.Id,
-        s.Name,
-        s.OwnerSub,
-        s.CreatedAtUtc,
-        s.CreatedBySub,
-        s.UpdatedAtUtc,
-        s.UpdatedBySub,
-        s.IsDeleted,
-        s.DeletedAtUtc,
-        s.DeletedBySub
-    );
-
 builder.Services.AddHangfire(cfg =>
 {
     cfg.SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
@@ -47,7 +33,6 @@ builder.Services.AddHangfire(cfg =>
        .UsePostgreSqlStorage(connString, new PostgreSqlStorageOptions
        {
            SchemaName = "hangfire"
-           // you can add more later if you want
        });
 });
 
@@ -94,25 +79,24 @@ builder.Services.AddAuthorization(options =>
 builder.Services.AddHangfireServer();
 
 builder.Services.AddProblemDetails();
+builder.Services.AddScoped<StoreService>();
 
 var app = builder.Build();
 
 app.UseCors("LocalDev");
-
 app.UseHangfireDashboard(builder.Configuration["Hangfire:DashboardPath"] ?? "/hangfire");
-
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseExceptionHandler();
 
-// smoke test background job
+// Smoke test background job
 RecurringJob.AddOrUpdate(
     "heartbeat",
     () => Console.WriteLine($"Hangfire heartbeat: {DateTimeOffset.Now}"),
     Cron.Minutely
 );
 
-// Configure the HTTP request pipeline.
+// Configure the HTTP request pipeline
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -133,6 +117,19 @@ static string GetSub(HttpContext ctx)
         ?? throw new Exception("No sub claim");
 }
 
+static string GetEmail(HttpContext ctx)
+{
+    var email = ctx.User.FindFirst("email")?.Value
+        ?? ctx.User.FindFirst(ClaimTypes.Email)?.Value
+        ?? ctx.User.FindFirst("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress")?.Value;
+
+    if (string.IsNullOrWhiteSpace(email))
+        throw new Exception("No email claim");
+
+    return email.Trim().ToLowerInvariant();
+}
+
+// Weather forecast
 app.MapGet("/weatherforecast", () =>
 {
     var forecast =  Enumerable.Range(1, 5).Select(index =>
@@ -147,67 +144,7 @@ app.MapGet("/weatherforecast", () =>
 })
 .WithName("GetWeatherForecast");
 
-app.MapGet("/stores", async (HttpContext ctx, AppDbContext db) =>
-{
-    var sub =
-        ctx.User.FindFirst("sub")?.Value
-        ?? ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
-
-    if (string.IsNullOrWhiteSpace(sub))
-        return Results.Unauthorized();
-
-    var stores = await db.Stores
-        .Where(s => s.OwnerSub == sub)
-        .OrderByDescending(s => s.Id)
-        .Select(s => new StoreDto(
-            s.Id,
-            s.Name,
-            s.OwnerSub,
-            s.CreatedAtUtc,
-            s.CreatedBySub,
-            s.UpdatedAtUtc,
-            s.UpdatedBySub,
-            s.IsDeleted,
-            s.DeletedAtUtc,
-            s.DeletedBySub
-        ))
-        .ToListAsync();
-
-    return Results.Ok(stores);
-})
-.RequireAuthorization("stores:read")
-.WithName("ListStores");
-
-app.MapGet("/stores/{id:int}", async (HttpContext ctx, int id, AppDbContext db) =>
-{
-    var sub =
-        ctx.User.FindFirst("sub")?.Value
-        ?? ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
-
-    if (string.IsNullOrWhiteSpace(sub))
-        return Results.Unauthorized();
-
-    var store = await db.Stores
-        .Where(s => s.Id == id && s.OwnerSub == sub)
-        .Select(s => new StoreDto(
-            s.Id,
-            s.Name,
-            s.OwnerSub,
-            s.CreatedAtUtc,
-            s.CreatedBySub,
-            s.UpdatedAtUtc,
-            s.UpdatedBySub,
-            s.IsDeleted,
-            s.DeletedAtUtc,
-            s.DeletedBySub
-        ))
-        .SingleOrDefaultAsync();
-
-    return store is null ? Results.NotFound() : Results.Ok(store);
-})
-.RequireAuthorization("stores:read")
-.WithName("GetStore");
-
+// Me (find user)
 app.MapGet("/me", (HttpContext ctx) =>
 {
     var sub =
@@ -223,111 +160,74 @@ app.MapGet("/me", (HttpContext ctx) =>
 .RequireAuthorization()
 .WithName("Me");
 
-app.MapPost("/stores", async (HttpContext ctx, CreateStoreRequestDto req, AppDbContext db) =>
+// Get stores
+app.MapGet("/stores", async (HttpContext ctx, StoreService stores) =>
 {
-    var sub =
-        ctx.User.FindFirst("sub")?.Value
-        ?? ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+    var sub = GetSub(ctx);
+    var list = await stores.ListAsync(sub);
+    return Results.Ok(list);
+})
+.RequireAuthorization("stores:read")
+.WithName("ListStores");
 
-    if (string.IsNullOrWhiteSpace(sub))
-        return Results.Unauthorized();
+// Get stores {id}
+app.MapGet("/stores/{id:int}", async (HttpContext ctx, int id, StoreService stores) =>
+{
+    var sub = GetSub(ctx);
+    var store = await stores.GetAsync(sub, id);
+    return store is null ? Results.NotFound() : Results.Ok(store);
+})
+.RequireAuthorization("stores:read")
+.WithName("GetStore");
 
-    var name = StoreValidation.NormalizeName(req.Name);
-    if (name is null || !StoreValidation.IsValidName(name))
-    {
-        return Results.Problem(
-            title: "Invalid store name",
-            detail: $"Name must be {StoreValidation.NameMin}-{StoreValidation.NameMax} characters.",
-            statusCode: 400
-        );
-    }
 
-    var store = new Store
-    {
-        Name = name,
-        OwnerSub = sub,
-        CreatedAtUtc = DateTimeOffset.UtcNow,
-        CreatedBySub = sub
-    };
+// Create store
+app.MapPost("/stores", async (HttpContext ctx, CreateStoreRequestDto req, StoreService stores) =>
+{
+    var sub = GetSub(ctx);
+    var (dto, error) = await stores.CreateAsync(sub, req);
+    if (error is not null) return error;
 
-    db.Stores.Add(store);
-    await db.SaveChangesAsync();
-
-    return Results.Created($"/stores/{store.Id}", ToDto(store));
+    return Results.Created($"/stores/{dto!.Id}", dto);
 })
 .RequireAuthorization("stores:write")
 .WithName("CreateStore");
 
-app.MapPut("/stores/{id:int}", async (HttpContext ctx, int id, RenameStoreRequestDto req, AppDbContext db) =>
+// Rename store
+app.MapPut("/stores/{id:int}", async (HttpContext ctx, int id, RenameStoreRequestDto req, StoreService stores) =>
 {
-    var sub =
-        ctx.User.FindFirst("sub")?.Value
-        ?? ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+    var sub = GetSub(ctx);
+    var (dto, error) = await stores.RenameAsync(sub, id, req);
+    if (error is not null) return error;
 
-    if (string.IsNullOrWhiteSpace(sub))
-        return Results.Unauthorized();
-
-    var name = StoreValidation.NormalizeName(req.Name);
-    if (name is null || !StoreValidation.IsValidName(name))
-    {
-        return Results.Problem(
-            title: "Invalid store name",
-            detail: $"Name must be {StoreValidation.NameMin}-{StoreValidation.NameMax} characters.",
-            statusCode: 400
-        );
-    }
-
-    var store = await db.Stores.SingleOrDefaultAsync(s => s.Id == id && s.OwnerSub == sub);
-    if (store is null) return Results.NotFound();
-
-    store.Name = name;
-    store.UpdatedAtUtc = DateTimeOffset.UtcNow;
-    store.UpdatedBySub = sub;
-
-    await db.SaveChangesAsync();
-
-    return Results.Ok(ToDto(store));
+    return Results.Ok(dto);
 })
 .RequireAuthorization("stores:write")
 .WithName("RenameStore");
 
-app.MapDelete("/stores/{id:int}", async (HttpContext ctx, int id, AppDbContext db) =>
-{
-    var sub =
-        ctx.User.FindFirst("sub")?.Value
-        ?? ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
-
-    if (string.IsNullOrWhiteSpace(sub))
-        return Results.Unauthorized();
-
-    var store = await db.Stores.SingleOrDefaultAsync(s => s.Id == id && s.OwnerSub == sub);
-    if (store is null) return Results.NotFound();
-
-    store.IsDeleted = true;
-    store.DeletedAtUtc = DateTimeOffset.UtcNow;
-    store.DeletedBySub = sub;
-
-    await db.SaveChangesAsync();
-    return Results.NoContent();
-})
-.RequireAuthorization("stores:delete") // or "stores:write" if you don't add delete perm yet
-.WithName("DeleteStore");
-
-app.MapGet("/stores/deleted", async (HttpContext ctx, AppDbContext db) =>
+// Delete store
+app.MapDelete("/stores/{id:int}", async (HttpContext ctx, int id, StoreService stores) =>
 {
     var sub = GetSub(ctx);
+    var error = await stores.SoftDeleteAsync(sub, id);
+    if (error is not null) return error;
 
-    var deleted = await db.Stores
-        .IgnoreQueryFilters()
-        .Where(s => s.OwnerSub == sub && s.IsDeleted)
-        .OrderByDescending(s => s.DeletedAtUtc)
-        .ToListAsync();
+    return Results.NoContent();
+})
+.RequireAuthorization("stores:delete")
+.WithName("DeleteStore");
 
+// Get deleted stores
+app.MapGet("/stores/deleted", async (HttpContext ctx, StoreService stores) =>
+{
+    var sub = GetSub(ctx);
+    var deleted = await stores.ListDeletedAsync(sub);
     return Results.Ok(deleted);
 })
 .RequireAuthorization("stores:read")
 .WithName("ListDeletedStores");
 
+// Get API health
 app.MapGet("/health", () =>
 {
     return Results.Ok(new
@@ -338,13 +238,48 @@ app.MapGet("/health", () =>
 })
 .WithName("Health");
 
+// Invite to store
+app.MapPost("/stores/{storeId:int}/invites", async (HttpContext ctx, int storeId, InviteRequestDto req, StoreService stores) =>
+{
+    var sub = GetSub(ctx);
+
+    var (dto, error) = await stores.InviteAsync(sub, storeId, req);
+    if (error is not null) return error;
+
+    return Results.Ok(dto);
+})
+.RequireAuthorization()
+.WithName("InviteToStore");
+
+// List invites
+app.MapGet("/invites/mine", async (HttpContext ctx, StoreService stores) =>
+{
+    var email = GetEmail(ctx);
+
+    var list = await stores.ListMyInvitesAsync(email);
+    return Results.Ok(list);
+})
+.RequireAuthorization()
+.WithName("MyInvites");
+
+// Accept invite
+app.MapPost("/invites/accept", async (HttpContext ctx, AcceptInviteRequestDto req, StoreService stores) =>
+{
+    var sub = GetSub(ctx);
+    var email = GetEmail(ctx);
+
+    var (store, error) = await stores.AcceptInviteAsync(sub, email, req.Token);
+    if (error is not null) return error;
+
+    return Results.Ok(store);
+})
+.RequireAuthorization()
+.WithName("AcceptInvite");
+
 app.MapGet("/", () => Results.Ok(new { name = "WooPulse API", status = "running" }))
    .WithName("Root");
 
 app.Run();
-
-record CreateStoreRequest(string Name);
-record RenameStoreRequest(string Name);
 
 record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
 {

@@ -67,52 +67,43 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [auth, setAuth] = useState<{ loggedIn: boolean; name?: string; email?: string; sub?: string } | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
+  const [activeStoreId, setActiveStoreId] = useState<number | null>(null);
+
+  type Invitation = {
+  id: number;
+  storeId: number;
+  email: string;
+  role: number;
+  status: number;
+  createdAtUtc: string;
+  expiresAtUtc?: string | null;
+  token?: string; // optional (only if your API returns it)
+  };
+
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<2 | 3>(3);
+  const [inviteResult, setInviteResult] = useState<any | null>(null);
+  const [myInvites, setMyInvites] = useState<Invitation[]>([]);
+  const [acceptToken, setAcceptToken] = useState("");
   
   async function load() {
     setBusy(true);
     setError(null);
 
     try {
-      // If you still want the same “see what came back” debugging,
-      // this reproduces it while still using your helper’s parsing/errors:
-      const healthPromise = fetch("/api/health", { cache: "no-store" });
-      const storesPromise = fetch("/api/stores", { cache: "no-store" });
+      // Use fetchJson so error handling is consistent across the whole app
+      const [h, storesData] = await Promise.all([
+        fetchJson<Health>("/api/health"),
+        fetchJson<Store[]>("/api/stores"),
+      ]);
 
-      const [healthRes, storesRes] = await Promise.all([healthPromise, storesPromise]);
+      setHealth(h);
+      setStores(storesData);
 
-      const healthText = await healthRes.text();
-      const storesText = await storesRes.text();
-
-      console.log("HEALTH status:", healthRes.status, "body:", healthText);
-      console.log("STORES status:", storesRes.status, "body:", storesText);
-
-      // Now enforce the SAME error semantics as fetchJson (ProblemDetails-aware)
-      // but using your already-read bodies.
-      if (!healthRes.ok) {
-        throw Object.assign(new Error(`health failed (${healthRes.status})`), {
-          api: {
-            status: healthRes.status,
-            title: tryGetProblemTitle(healthRes.headers.get("content-type") ?? "", healthText),
-            detail: tryGetProblemDetail(healthRes.headers.get("content-type") ?? "", healthText),
-            raw: healthText,
-          } satisfies ApiError,
-        });
+      // Initialize active store once, after stores load
+      if (storesData.length && activeStoreId == null) {
+        setActiveStoreId(storesData[0].id);
       }
-
-      if (!storesRes.ok) {
-        throw Object.assign(new Error(`stores failed (${storesRes.status})`), {
-          api: {
-            status: storesRes.status,
-            title: tryGetProblemTitle(storesRes.headers.get("content-type") ?? "", storesText),
-            detail: tryGetProblemDetail(storesRes.headers.get("content-type") ?? "", storesText),
-            raw: storesText,
-          } satisfies ApiError,
-        });
-      }
-
-      // success: parse like you did before
-      setHealth(JSON.parse(healthText));
-      setStores(JSON.parse(storesText));
     } catch (e: any) {
       console.error("LOAD FAILED:", e?.message ?? e);
 
@@ -121,15 +112,15 @@ export default function Home() {
 
       setError(api);
 
-      // keep UI sane
       setHealth({ status: "error", utc: new Date().toISOString() } as any);
       setStores([]);
     } finally {
       setBusy(false);
     }
+    
   }
 
-// tiny helpers to parse ProblemDetails when present
+  // tiny helpers to parse ProblemDetails when present
   function tryGetProblemTitle(contentType: string, text: string): string | undefined {
     if (contentType.includes("application/json") && text) {
       try { return JSON.parse(text)?.title; } catch {}
@@ -194,6 +185,67 @@ export default function Home() {
     try {
       await fetchJson(`/api/stores/${id}`, { method: "DELETE" });
       await load();
+    } catch (e: any) {
+      setError(e?.api ?? { status: 0, title: "Unknown error", detail: e?.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function inviteToActiveStore() {
+    if (!activeStoreId) {
+      setError({ status: 0, title: "No active store", detail: "Select an active store first." });
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    setInviteResult(null);
+
+    try {
+      const dto = await fetchJson(`/api/stores/${activeStoreId}/invites`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: inviteEmail, role: inviteRole }),
+      });
+
+      setInviteResult(dto);
+      setInviteEmail("");
+    } catch (e: any) {
+      setError(e?.api ?? { status: 0, title: "Unknown error", detail: e?.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadMyInvites() {
+    setBusy(true);
+    setError(null);
+
+    try {
+      const list = await fetchJson<Invitation[]>("/api/invites/mine");
+      setMyInvites(list);
+    } catch (e: any) {
+      setError(e?.api ?? { status: 0, title: "Unknown error", detail: e?.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function acceptInvite(token: string) {
+    setBusy(true);
+    setError(null);
+
+    try {
+      await fetchJson(`/api/invites/accept`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+
+      setAcceptToken("");
+      await loadMyInvites(); // refresh invite list
+      await load();          // refresh stores so invited store appears
     } catch (e: any) {
       setError(e?.api ?? { status: 0, title: "Unknown error", detail: e?.message });
     } finally {
@@ -281,6 +333,110 @@ export default function Home() {
         <button onClick={load} disabled={busy} style={{ padding: "8px 12px" }}>
           Refresh
         </button>
+      </div>
+
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ marginRight: 8 }}>Active store:</label>
+        <select
+          value={activeStoreId ?? ""}
+          onChange={(e) => setActiveStoreId(Number(e.target.value))}
+          disabled={!stores.length}
+        >
+          {stores.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name} (#{s.id})
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* Invite to active store */}
+      <div style={{ border: "1px solid #333", padding: 12, borderRadius: 8, marginBottom: 12 }}>
+        <div style={{ fontWeight: 700, marginBottom: 8 }}>Invite member to active store</div>
+
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <input
+            value={inviteEmail}
+            onChange={(e) => setInviteEmail(e.target.value)}
+            placeholder="email@example.com"
+            style={{ padding: 8, width: 260 }}
+            disabled={busy}
+          />
+
+          <select
+            value={inviteRole}
+            onChange={(e) => setInviteRole(Number(e.target.value) as 2 | 3)}
+            disabled={busy}
+          >
+            <option value={3}>Member</option>
+            <option value={2}>Admin</option>
+          </select>
+
+          <button
+            onClick={inviteToActiveStore}
+            disabled={busy || !activeStoreId || !inviteEmail.trim()}
+            style={{ padding: "8px 12px" }}
+          >
+            Invite
+          </button>
+        </div>
+
+        {inviteResult && (
+          <pre style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
+            {JSON.stringify(inviteResult, null, 2)}
+          </pre>
+        )}
+      </div>
+
+      {/* My invites */}
+      <div style={{ border: "1px solid #333", padding: 12, borderRadius: 8, marginBottom: 12 }}>
+        <div style={{ fontWeight: 700, marginBottom: 8 }}>My pending invites</div>
+
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+          <button onClick={loadMyInvites} disabled={busy} style={{ padding: "8px 12px" }}>
+            Refresh invites
+          </button>
+
+          <input
+            value={acceptToken}
+            onChange={(e) => setAcceptToken(e.target.value)}
+            placeholder="Paste invite token to accept"
+            style={{ padding: 8, width: 320 }}
+            disabled={busy}
+          />
+
+          <button
+            onClick={() => acceptInvite(acceptToken.trim())}
+            disabled={busy || !acceptToken.trim()}
+            style={{ padding: "8px 12px" }}
+          >
+            Accept token
+          </button>
+        </div>
+
+        {myInvites.length === 0 ? (
+          <div style={{ opacity: 0.75 }}>No pending invites loaded (or none exist).</div>
+        ) : (
+          myInvites.map(i => (
+            <div key={i.id} style={{ border: "1px solid #444", padding: 10, borderRadius: 8, marginBottom: 8 }}>
+              <div><b>Invite #{i.id}</b> → Store #{i.storeId}</div>
+              <div style={{ fontSize: 12, opacity: 0.85 }}>
+                Email: {i.email} | Role: {i.role} | Expires: {i.expiresAtUtc ?? "(none)"}
+              </div>
+
+              {/* if token comes back in dev, accept with one click */}
+              {i.token && (
+                <button
+                  onClick={() => acceptInvite(i.token!)}
+                  disabled={busy}
+                  style={{ marginTop: 8 }}
+                >
+                  Accept this invite
+                </button>
+              )}
+            </div>
+          ))
+        )}
       </div>
 
       {stores.map((s) => (

@@ -8,6 +8,8 @@ public class AppDbContext : DbContext
     public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
 
     public DbSet<Store> Stores => Set<Store>();
+    public DbSet<StoreInvitation> StoreInvitations => Set<StoreInvitation>();
+    public DbSet<StoreMember> StoreMembers => Set<StoreMember>(); 
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -15,6 +17,38 @@ public class AppDbContext : DbContext
 
         modelBuilder.Entity<Store>()
             .HasQueryFilter(s => !s.IsDeleted);
+
+        modelBuilder.Entity<StoreMember>()
+            .HasQueryFilter(m => !m.Store.IsDeleted);
+
+        modelBuilder.Entity<StoreInvitation>()
+            .HasQueryFilter(i => !i.Store.IsDeleted);
+
+        modelBuilder.Entity<StoreMember>()
+            .HasIndex(m => new { m.StoreId, m.UserSub })
+            .IsUnique();
+
+        modelBuilder.Entity<StoreMember>()
+            .HasIndex(m => m.UserSub);
+
+        modelBuilder.Entity<StoreMember>()
+            .Property(m => m.Role)
+            .HasConversion<int>();
+        
+        modelBuilder.Entity<StoreInvitation>()
+            .HasIndex(i => i.Token)
+            .IsUnique();
+
+        modelBuilder.Entity<StoreInvitation>()
+            .HasIndex(i => new { i.StoreId, i.Email, i.Status });
+
+        modelBuilder.Entity<StoreInvitation>()
+            .Property(i => i.Role)
+            .HasConversion<int>();
+
+        modelBuilder.Entity<StoreInvitation>()
+            .Property(i => i.Status)
+            .HasConversion<int>();
     }
 }
 
@@ -37,4 +71,5 @@ public class Store
     public bool IsDeleted { get; set; } = false;
     public DateTimeOffset? DeletedAtUtc { get; set; }
     public string? DeletedBySub { get; set; }
+     public List<StoreMember> Members { get; set; } = new();
 }
