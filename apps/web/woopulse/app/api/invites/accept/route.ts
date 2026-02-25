@@ -1,27 +1,24 @@
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
+import { auth0 } from "@/lib/auth0";
 
 const API_BASE = process.env.API_BASE_URL ?? "http://localhost:5113";
-const TOKEN_COOKIE = "access_token";
-
-async function buildAuthHeaders(): Promise<Headers> {
-  const cookieStore = await cookies();
-  const token = cookieStore.get(TOKEN_COOKIE)?.value;
-
-  const headers = new Headers();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  return headers;
-}
 
 export async function POST(req: Request) {
-  const body = await req.text();
+  let token: string;
+  try {
+    ({ token } = await auth0.getAccessToken());
+  } catch {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
 
-  const headers = await buildAuthHeaders();
-  headers.set("Content-Type", "application/json");
+  const body = await req.text();
 
   const upstream = await fetch(`${API_BASE}/invites/accept`, {
     method: "POST",
-    headers,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
     body,
     cache: "no-store",
   });

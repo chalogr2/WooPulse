@@ -117,9 +117,15 @@ static string GetSub(HttpContext ctx)
         ?? throw new Exception("No sub claim");
 }
 
+// Get email from token
 static string GetEmail(HttpContext ctx)
 {
-    var email = ctx.User.FindFirst("email")?.Value
+    var email =
+        // custom namespaced claim (recommended)
+        ctx.User.FindFirst("https://woopulse.local/email")?.Value
+
+        // common non-namespaced fallbacks (might still be absent)
+        ?? ctx.User.FindFirst("email")?.Value
         ?? ctx.User.FindFirst(ClaimTypes.Email)?.Value
         ?? ctx.User.FindFirst("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress")?.Value;
 
@@ -262,6 +268,19 @@ app.MapGet("/invites/mine", async (HttpContext ctx, StoreService stores) =>
 .RequireAuthorization()
 .WithName("MyInvites");
 
+// List debug invites
+app.MapGet("/invites/mine/debug", async (HttpContext ctx, StoreService stores) =>
+{
+    if (!app.Environment.IsDevelopment())
+        return Results.NotFound();
+
+    var email = GetEmail(ctx);
+    var invites = await stores.ListMyInvitesDebugAsync(email);
+    return Results.Ok(invites);
+})
+.RequireAuthorization()
+.WithName("MyInvitesDebug");
+
 // Accept invite
 app.MapPost("/invites/accept", async (HttpContext ctx, AcceptInviteRequestDto req, StoreService stores) =>
 {
@@ -275,6 +294,14 @@ app.MapPost("/invites/accept", async (HttpContext ctx, AcceptInviteRequestDto re
 })
 .RequireAuthorization()
 .WithName("AcceptInvite");
+
+// Debug claims
+app.MapGet("/debug/claims", (HttpContext ctx) =>
+{
+    var claims = ctx.User.Claims.Select(c => new { c.Type, c.Value }).ToList();
+    return Results.Ok(claims);
+})
+.RequireAuthorization();
 
 app.MapGet("/", () => Results.Ok(new { name = "WooPulse API", status = "running" }))
    .WithName("Root");

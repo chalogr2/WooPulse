@@ -300,4 +300,24 @@ public class StoreService
         var store = await GetAsync(sub, inv.StoreId);
         return (store, null);
     }
+
+    public async Task<List<InvitationDebugDto>> ListMyInvitesDebugAsync(string email)
+    {
+        email = NormalizeEmail(email);
+
+        return await _db.StoreInvitations
+            .Where(i => i.Email == email && i.Status == InvitationStatus.Pending)
+            .OrderByDescending(i => i.CreatedAtUtc)
+            .Select(i => new InvitationDebugDto(
+                i.Id,
+                i.StoreId,
+                i.Email,
+                (int)i.Role,
+                (int)i.Status,
+                i.Token,
+                i.CreatedAtUtc,
+                i.ExpiresAtUtc
+            ))
+            .ToListAsync();
+    }
 }

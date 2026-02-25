@@ -23,6 +23,17 @@ type ApiError = {
   raw?: string;
 };
 
+type InvitationDebug = {
+  id: number;
+  storeId: number;
+  email: string;
+  role: number;
+  status: number;
+  token: string;
+  createdAtUtc: string;
+  expiresAtUtc?: string | null;
+};
+
 async function fetchJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
   const res = await fetch(input, { cache: "no-store", ...init });
 
@@ -68,6 +79,7 @@ export default function Home() {
   const [auth, setAuth] = useState<{ loggedIn: boolean; name?: string; email?: string; sub?: string } | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   const [activeStoreId, setActiveStoreId] = useState<number | null>(null);
+  const [invites, setInvites] = useState<InvitationDebug[]>([]);
 
   type Invitation = {
   id: number;
@@ -225,6 +237,20 @@ export default function Home() {
     try {
       const list = await fetchJson<Invitation[]>("/api/invites/mine");
       setMyInvites(list);
+    } catch (e: any) {
+      setError(e?.api ?? { status: 0, title: "Unknown error", detail: e?.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadMyInvitesDebug() {
+    setBusy(true);
+    setError(null);
+
+    try {
+      const list = await fetchJson<InvitationDebug[]>("/api/invites/mine/debug");
+      setInvites(list);
     } catch (e: any) {
       setError(e?.api ?? { status: 0, title: "Unknown error", detail: e?.message });
     } finally {
@@ -393,8 +419,23 @@ export default function Home() {
         <div style={{ fontWeight: 700, marginBottom: 8 }}>My pending invites</div>
 
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
-          <button onClick={loadMyInvites} disabled={busy} style={{ padding: "8px 12px" }}>
-            Refresh invites
+          <button
+            onClick={async () => {
+              setBusy(true);
+              setError(null);
+              try {
+                const list = await fetchJson<any[]>("/api/invites/mine/debug");
+                setMyInvites(list);
+              } catch (e: any) {
+                setError(e?.api ?? { status: 0, title: "Unknown error", detail: e?.message });
+              } finally {
+                setBusy(false);
+              }
+            }}
+            disabled={busy}
+            style={{ padding: "8px 12px" }}
+          >
+            Refresh invites (debug)
           </button>
 
           <input
@@ -427,7 +468,7 @@ export default function Home() {
               {/* if token comes back in dev, accept with one click */}
               {i.token && (
                 <button
-                  onClick={() => acceptInvite(i.token!)}
+                  onClick={() => acceptInvite((i as any)["token"])}
                   disabled={busy}
                   style={{ marginTop: 8 }}
                 >
