@@ -1,5 +1,4 @@
 using Microsoft.EntityFrameworkCore;
-using WooPulse.Api.Entities;
 
 namespace WooPulse.Api.Data;
 

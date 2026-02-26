@@ -164,7 +164,7 @@ public class StoreService
     {
         return await _db.Stores
             .IgnoreQueryFilters()
-            .Where(s => s.OwnerSub == sub && s.IsDeleted)
+            .Where(s => s.IsDeleted && s.Members.Any(m => m.UserSub == sub))
             .OrderByDescending(s => s.DeletedAtUtc)
             .Select(s => ToDto(s))
             .ToListAsync();
@@ -180,6 +180,10 @@ public class StoreService
             return (null, Results.Problem("Invalid email", "Provide a valid email.", statusCode: 400));
         }
 
+        if (!Enum.IsDefined(typeof(StoreRole), req.Role))
+        {
+            return (null, Results.Problem("Invalid role", "Role must be Admin (2) or Member (3).", statusCode: 400));
+        }
         var role = (StoreRole)req.Role;
         if (!IsValidInviteRole(role))
         {
@@ -232,8 +236,8 @@ public class StoreService
             inv.Id,
             inv.StoreId,
             inv.Email,
-            (int)inv.Role,
-            (int)inv.Status,
+            inv.Role.ToString(),
+            inv.Status.ToString(),
             inv.CreatedAtUtc,
             inv.ExpiresAtUtc
         ), null);
@@ -245,19 +249,20 @@ public class StoreService
     {
         var norm = NormalizeEmail(email);
 
-        return await _db.StoreInvitations
+        var rows = await _db.StoreInvitations
             .Where(i => i.Email == norm && i.Status == InvitationStatus.Pending)
             .OrderByDescending(i => i.CreatedAtUtc)
-            .Select(i => new InvitationDto(
-                i.Id, i.StoreId, i.Email,
-                (int)i.Role, (int)i.Status,
-                i.CreatedAtUtc, i.ExpiresAtUtc
-            ))
             .ToListAsync();
+
+        return rows.Select(i => new InvitationDto(
+            i.Id, i.StoreId, i.Email,
+            i.Role.ToString(), i.Status.ToString(),
+            i.CreatedAtUtc, i.ExpiresAtUtc
+        )).ToList();
     }
 
-    // What: 
-    // Why: 
+    // What: accept an invite, add member row + mark invite accepted atomically
+    // Why: two writes must succeed or fail together; explicit tx also prevents TOCTOU on status+membership checks
     public async Task<(StoreDto? store, IResult? error)> AcceptInviteAsync(string sub, string email, string token)
     {
         var normEmail = NormalizeEmail(email);
@@ -265,6 +270,8 @@ public class StoreService
 
         if (string.IsNullOrWhiteSpace(token))
             return (null, Results.Problem("Invalid token", "Token is required.", statusCode: 400));
+
+        await using var tx = await _db.Database.BeginTransactionAsync();
 
         var inv = await _db.StoreInvitations.SingleOrDefaultAsync(i => i.Token == token);
         if (inv is null) return (null, Results.NotFound());
@@ -296,6 +303,7 @@ public class StoreService
         inv.RespondedBySub = sub;
 
         await _db.SaveChangesAsync();
+        await tx.CommitAsync();
 
         var store = await GetAsync(sub, inv.StoreId);
         return (store, null);
@@ -305,19 +313,20 @@ public class StoreService
     {
         email = NormalizeEmail(email);
 
-        return await _db.StoreInvitations
+        var rows = await _db.StoreInvitations
             .Where(i => i.Email == email && i.Status == InvitationStatus.Pending)
             .OrderByDescending(i => i.CreatedAtUtc)
-            .Select(i => new InvitationDebugDto(
-                i.Id,
-                i.StoreId,
-                i.Email,
-                (int)i.Role,
-                (int)i.Status,
-                i.Token,
-                i.CreatedAtUtc,
-                i.ExpiresAtUtc
-            ))
             .ToListAsync();
+
+        return rows.Select(i => new InvitationDebugDto(
+            i.Id,
+            i.StoreId,
+            i.Email,
+            i.Role.ToString(),
+            i.Status.ToString(),
+            i.Token,
+            i.CreatedAtUtc,
+            i.ExpiresAtUtc
+        )).ToList();
     }
 }

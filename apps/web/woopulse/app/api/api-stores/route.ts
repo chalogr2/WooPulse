@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth0 } from "@/lib/auth0";
 
+const API_BASE = process.env.API_BASE_URL!;
+
 function forwardSetCookies(from: NextResponse, to: NextResponse) {
   // NextResponse may contain one or multiple Set-Cookie headers
   const anyHeaders = from.headers as any;
@@ -26,7 +28,7 @@ async function getAccessTokenFromAuth0(request: NextRequest) {
 export async function GET(request: NextRequest) {
   const { accessToken, auth0Response } = await getAccessTokenFromAuth0(request);
 
-  const upstream = await fetch("http://localhost:5113/stores", {
+  const upstream = await fetch(`${API_BASE}/stores`, {
     headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
   });
 
@@ -48,7 +50,7 @@ export async function POST(request: NextRequest) {
 
   const body = await request.text();
 
-  const upstream = await fetch("http://localhost:5113/stores", {
+  const upstream = await fetch(`${API_BASE}/stores`, {
     method: "POST",
     headers: {
       "content-type": "application/json",

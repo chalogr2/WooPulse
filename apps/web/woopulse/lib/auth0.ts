@@ -1,10 +1,10 @@
 import { Auth0Client } from "@auth0/nextjs-auth0/server";
 
 export const auth0 = new Auth0Client({
-  domain: "dev-p6v7djlwowndrygd.us.auth0.com",
-  clientId: "p7kXXDxkV1t5f6BApgvavPJfAtbrAECz",
+  domain: process.env.AUTH0_DOMAIN!,
+  clientId: process.env.AUTH0_CLIENT_ID!,
   authorizationParameters: {
-    audience: "https://api.woopulse.local",
-    scope: "openid profile email stores:read stores:write",
+    audience: process.env.AUTH0_AUDIENCE!,
+    scope: process.env.AUTH0_SCOPE ?? "openid profile email stores:read stores:write stores:delete",
   },
 });

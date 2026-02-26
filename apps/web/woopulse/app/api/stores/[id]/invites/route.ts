@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth0 } from "@/lib/auth0";
 
-const API_BASE = process.env.API_BASE_URL ?? "http://localhost:5113";
+const API_BASE = process.env.API_BASE_URL!;
 
 export async function POST(
   req: Request,

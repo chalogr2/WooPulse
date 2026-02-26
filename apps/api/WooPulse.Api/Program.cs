@@ -9,6 +9,7 @@ using System.Security.Claims;
 using WooPulse.Api.Dtos;
 using WooPulse.Api.Validation;
 using WooPulse.Api.Services;
+using WooPulse.Api.Security;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -80,11 +81,15 @@ builder.Services.AddHangfireServer();
 
 builder.Services.AddProblemDetails();
 builder.Services.AddScoped<StoreService>();
+builder.Services.AddScoped<MaintenanceService>();
 
 var app = builder.Build();
 
 app.UseCors("LocalDev");
-app.UseHangfireDashboard(builder.Configuration["Hangfire:DashboardPath"] ?? "/hangfire");
+app.UseHangfireDashboard("/hangfire", new Hangfire.DashboardOptions
+{
+    Authorization = new[] { new Hangfire.Dashboard.LocalRequestsOnlyAuthorizationFilter() }
+});
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseExceptionHandler();
@@ -94,6 +99,18 @@ RecurringJob.AddOrUpdate(
     "heartbeat",
     () => Console.WriteLine($"Hangfire heartbeat: {DateTimeOffset.Now}"),
     Cron.Minutely
+);
+
+RecurringJob.AddOrUpdate<MaintenanceService>(
+    "expire-invites",
+    svc => svc.ExpireInvitesAsync(),
+    Cron.Hourly
+);
+
+RecurringJob.AddOrUpdate<MaintenanceService>(
+    "purge-soft-deleted-stores",
+    svc => svc.PurgeSoftDeletedStoresAsync(30),
+    Cron.Daily
 );
 
 // Configure the HTTP request pipeline
@@ -110,15 +127,14 @@ var summaries = new[]
     "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
 };
 
-static string GetSub(HttpContext ctx)
+static string? GetSub(HttpContext ctx)
 {
     return ctx.User.FindFirst("sub")?.Value
-        ?? ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
-        ?? throw new Exception("No sub claim");
+        ?? ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
 }
 
 // Get email from token
-static string GetEmail(HttpContext ctx)
+static string? GetEmail(HttpContext ctx)
 {
     var email =
         // custom namespaced claim (recommended)
@@ -129,10 +145,7 @@ static string GetEmail(HttpContext ctx)
         ?? ctx.User.FindFirst(ClaimTypes.Email)?.Value
         ?? ctx.User.FindFirst("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress")?.Value;
 
-    if (string.IsNullOrWhiteSpace(email))
-        throw new Exception("No email claim");
-
-    return email.Trim().ToLowerInvariant();
+    return string.IsNullOrWhiteSpace(email) ? null : email.Trim().ToLowerInvariant();
 }
 
 // Weather forecast
@@ -170,6 +183,7 @@ app.MapGet("/me", (HttpContext ctx) =>
 app.MapGet("/stores", async (HttpContext ctx, StoreService stores) =>
 {
     var sub = GetSub(ctx);
+    if (sub is null) return Results.Unauthorized();
     var list = await stores.ListAsync(sub);
     return Results.Ok(list);
 })
@@ -180,6 +194,7 @@ app.MapGet("/stores", async (HttpContext ctx, StoreService stores) =>
 app.MapGet("/stores/{id:int}", async (HttpContext ctx, int id, StoreService stores) =>
 {
     var sub = GetSub(ctx);
+    if (sub is null) return Results.Unauthorized();
     var store = await stores.GetAsync(sub, id);
     return store is null ? Results.NotFound() : Results.Ok(store);
 })
@@ -191,6 +206,7 @@ app.MapGet("/stores/{id:int}", async (HttpContext ctx, int id, StoreService stor
 app.MapPost("/stores", async (HttpContext ctx, CreateStoreRequestDto req, StoreService stores) =>
 {
     var sub = GetSub(ctx);
+    if (sub is null) return Results.Unauthorized();
     var (dto, error) = await stores.CreateAsync(sub, req);
     if (error is not null) return error;
 
@@ -203,6 +219,7 @@ app.MapPost("/stores", async (HttpContext ctx, CreateStoreRequestDto req, StoreS
 app.MapPut("/stores/{id:int}", async (HttpContext ctx, int id, RenameStoreRequestDto req, StoreService stores) =>
 {
     var sub = GetSub(ctx);
+    if (sub is null) return Results.Unauthorized();
     var (dto, error) = await stores.RenameAsync(sub, id, req);
     if (error is not null) return error;
 
@@ -215,6 +232,7 @@ app.MapPut("/stores/{id:int}", async (HttpContext ctx, int id, RenameStoreReques
 app.MapDelete("/stores/{id:int}", async (HttpContext ctx, int id, StoreService stores) =>
 {
     var sub = GetSub(ctx);
+    if (sub is null) return Results.Unauthorized();
     var error = await stores.SoftDeleteAsync(sub, id);
     if (error is not null) return error;
 
@@ -227,6 +245,7 @@ app.MapDelete("/stores/{id:int}", async (HttpContext ctx, int id, StoreService s
 app.MapGet("/stores/deleted", async (HttpContext ctx, StoreService stores) =>
 {
     var sub = GetSub(ctx);
+    if (sub is null) return Results.Unauthorized();
     var deleted = await stores.ListDeletedAsync(sub);
     return Results.Ok(deleted);
 })
@@ -248,6 +267,7 @@ app.MapGet("/health", () =>
 app.MapPost("/stores/{storeId:int}/invites", async (HttpContext ctx, int storeId, InviteRequestDto req, StoreService stores) =>
 {
     var sub = GetSub(ctx);
+    if (sub is null) return Results.Unauthorized();
 
     var (dto, error) = await stores.InviteAsync(sub, storeId, req);
     if (error is not null) return error;
@@ -261,6 +281,7 @@ app.MapPost("/stores/{storeId:int}/invites", async (HttpContext ctx, int storeId
 app.MapGet("/invites/mine", async (HttpContext ctx, StoreService stores) =>
 {
     var email = GetEmail(ctx);
+    if (email is null) return Results.Unauthorized();
 
     var list = await stores.ListMyInvitesAsync(email);
     return Results.Ok(list);
@@ -275,6 +296,7 @@ app.MapGet("/invites/mine/debug", async (HttpContext ctx, StoreService stores) =
         return Results.NotFound();
 
     var email = GetEmail(ctx);
+    if (email is null) return Results.Unauthorized();
     var invites = await stores.ListMyInvitesDebugAsync(email);
     return Results.Ok(invites);
 })
@@ -285,7 +307,9 @@ app.MapGet("/invites/mine/debug", async (HttpContext ctx, StoreService stores) =
 app.MapPost("/invites/accept", async (HttpContext ctx, AcceptInviteRequestDto req, StoreService stores) =>
 {
     var sub = GetSub(ctx);
+    if (sub is null) return Results.Unauthorized();
     var email = GetEmail(ctx);
+    if (email is null) return Results.Unauthorized();
 
     var (store, error) = await stores.AcceptInviteAsync(sub, email, req.Token);
     if (error is not null) return error;
@@ -302,6 +326,31 @@ app.MapGet("/debug/claims", (HttpContext ctx) =>
     return Results.Ok(claims);
 })
 .RequireAuthorization();
+
+// Dev endpoint to test expiration of invites
+app.MapPost("/jobs/expire-invites", async (MaintenanceService maintenance) =>
+{
+    if (!app.Environment.IsDevelopment())
+        return Results.NotFound();
+
+    var count = await maintenance.ExpireInvitesAsync();
+    return Results.Ok(new { expiredInvites = count });
+})
+.RequireAuthorization()
+.WithName("RunExpireInvitesJob");
+
+// Dev endpoint to test purging of soft-deleted stores
+app.MapPost("/jobs/purge-deleted-stores", async (int? days, MaintenanceService maintenance) =>
+{
+    if (!app.Environment.IsDevelopment())
+        return Results.NotFound();
+
+    var olderThanDays = days ?? 30;
+    var count = await maintenance.PurgeSoftDeletedStoresAsync(olderThanDays);
+    return Results.Ok(new { purgedStores = count, olderThanDays });
+})
+.RequireAuthorization()
+.WithName("RunPurgeDeletedStoresJob");
 
 app.MapGet("/", () => Results.Ok(new { name = "WooPulse API", status = "running" }))
    .WithName("Root");

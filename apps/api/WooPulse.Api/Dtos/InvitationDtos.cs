@@ -7,8 +7,8 @@ public record InvitationDto(
     int Id,
     int StoreId,
     string Email,
-    int Role,
-    int Status,
+    string Role,
+    string Status,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset? ExpiresAtUtc
 );

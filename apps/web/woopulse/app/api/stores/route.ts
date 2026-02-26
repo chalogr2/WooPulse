@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { auth0 } from "@/lib/auth0";
 
-// GET /api/stores -> calls GET http://localhost:5113/stores
+const API_BASE = process.env.API_BASE_URL!;
+
+// GET /api/stores -> calls GET {API_BASE}/stores
 export async function GET() {
   const { token } = await auth0.getAccessToken();
 
-  const res = await fetch("http://localhost:5113/stores", {
+  const res = await fetch(`${API_BASE}/stores`, {
     headers: { Authorization: `Bearer ${token}` },
     cache: "no-store",
   });
@@ -14,12 +16,12 @@ export async function GET() {
   return NextResponse.json(data, { status: res.status });
 }
 
-// POST /api/stores -> calls POST http://localhost:5113/stores
+// POST /api/stores -> calls POST {API_BASE}/stores
 export async function POST(req: Request) {
   const { token } = await auth0.getAccessToken();
   const body = await req.text();
 
-  const res = await fetch("http://localhost:5113/stores", {
+  const res = await fetch(`${API_BASE}/stores`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
