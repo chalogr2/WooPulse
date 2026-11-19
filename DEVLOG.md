@@ -1120,3 +1120,185 @@ Items sold = 2,686, confirmed in SQL (one line alone was 2,000 sheets of paper).
 **Files:** `Services/AnalyticsService.cs`.
 
 **Result:** owner confirmed the dashboard works and looks right. Committed with #013.
+
+---
+
+### #015 — 2026-11-19 — Step 3: frontend overhaul (every block is its own component)
+
+**What:** the single 512-line `app/page.tsx` was replaced by **one component per block**, laid
+out in the owner's order. Every block uses the same card style and color tokens as the
+analytics block. **No backend changes.**
+
+**Layout (owner's spec)**
+```
+WooPulse
+┌ UserCard ─────┐┌ StoresPanel (2/3 width) ────────────────────────┐
+│ avatar, name, ││ create store · Refresh                          │
+│ email, sub    ││ Invite to <active store> (Owner/Admin)          │
+│ Log out       ││ TeamPanel: team + pending invites of that store │
+└───────────────┘└─────────────────────────────────────────────────┘
+ActiveStoreSelect   (dropdown + my role badge)
+ConnectionPanel     (connection | sync status, side by side on wide screens)
+AnalyticsDashboard  (unchanged)
+MyInvitesPanel      (invites sent TO me, Accept buttons, paste-token fallback)
+StoreList           ("Owned by me" | "Member of", Open / Rename inline / Delete)
+TrashPanel          ("Deleted stores", Restore)
+```
+- Removed: the "Auth" heading, the **API health** block (`/api/health` route still exists, just
+  unused), the raw JSON dump after inviting (now a readable "✅ Invited x as Member (expires …)"),
+  the browser `prompt()` for renaming (now inline), the "Refresh invites (debug)" button
+  (My invites now loads by itself).
+- Responsive: one column on phones, side-by-side on wide screens (Tailwind `lg:grid-cols-3`, `md:grid-cols-2`).
+- Logged out: only a "Welcome to WooPulse · Log in" card. Stores are loaded **only after the
+  profile check says you're logged in**, so visitors no longer see a 401 error banner.
+
+**New files**
+| File | Role |
+|---|---|
+| `lib/types.ts` | shared types: `Role`, `Store`, `AuthState` |
+| `components/ui.tsx` | design-system primitives: `Card`, `Button` (primary/secondary/danger), `buttonClass` (for `<a>` links), `inputClass`, `ErrorText`, `RoleBadge`, `SectionTitle`, `muted`, date formatters |
+| `components/UserCard.tsx` | who's logged in / Log in |
+| `components/StoresPanel.tsx` | create store + invite + embeds `TeamPanel` |
+| `components/ActiveStoreSelect.tsx` | the active-store dropdown |
+| `components/MyInvitesPanel.tsx` | my invites + accept |
+| `components/StoreList.tsx` | my stores, grouped, with inline rename |
+
+Restyled (logic unchanged): `TeamPanel.tsx` (now embedded in the Stores card), `ConnectionPanel.tsx`,
+`TrashPanel.tsx`.
+
+**Architecture / React concepts**
+- **Lifting state up:** state that several blocks need (auth, stores, active store, `dataVersion`)
+  lives in their closest common parent, `page.tsx`. Children receive it as **props** and report changes
+  through **callbacks** (`onStoresChanged`, `onSelect`, `onCreated`). Everything else (form fields,
+  busy flags, errors) stays **inside** the block that uses it. That's what makes each block encapsulated.
+- **One source of style:** `components/ui.tsx`. Changing the button look changes it everywhere.
+  `Button` accepts every normal `<button>` prop through `ButtonHTMLAttributes` + `...rest`.
+- **Forms with `onSubmit` + `e.preventDefault()`:** pressing Enter submits (create store, invite,
+  rename, paste token) without the browser reloading the page.
+- **`MyInvitesPanel` endpoint fallback:** tries `/api/invites/mine/debug` (dev, includes tokens
+  → one-click Accept); on **404** (production) falls back to `/api/invites/mine`.
+- **After creating a store** it becomes the active store (`handleCreated`: reload, then select).
+- **Lint rule `react-hooks/set-state-in-effect`:** calling a state-changing function directly in a
+  `useEffect` body causes an extra render. The profile check now sets state inside the `.then()`
+  callback and loads stores from there.
+
+**Small fixes included**
+- `app/layout.tsx`: page title "WooPulse" (was "Create Next App", finding C8).
+- `app/globals.css`: body font now uses **Geist**. It was already downloaded by `layout.tsx`, but
+  `font-family: Arial` ignored it.
+- `app/api/profile/route.ts`: removed `any` (the SDK already types `session.user`).
+- **Lint: 0 problems** (was 23 at the audit, finding C6 closed). `tsc` passes.
+- Accessibility: every input has a label or `aria-label`; errors use `role="alert"`; status is
+  icon + text, never color alone.
+
+**Files:** new `lib/types.ts`, `components/ui.tsx`, `UserCard.tsx`, `StoresPanel.tsx`,
+`ActiveStoreSelect.tsx`, `MyInvitesPanel.tsx`, `StoreList.tsx`; rewritten `app/page.tsx`,
+`TeamPanel.tsx`, `TrashPanel.tsx`, `ConnectionPanel.tsx` (render part); changed `app/layout.tsx`,
+`app/globals.css`, `app/api/profile/route.ts`.
+
+**How to verify:**
+- Done: `tsc` passes, **lint 0 problems**, page renders (HTTP 200).
+- **Needs you** (no API restart needed; Next.js reloads by itself):
+  1. Layout order matches the spec; resize the window narrow → blocks stack into one column.
+  2. Create a store (press Enter) → it becomes the active store.
+  3. Invite → readable confirmation, appears under the team's "Pending invites".
+  4. As the invitee: "My pending invites" shows it automatically → Accept → store appears in "Member of".
+  5. Rename inline (Enter saves), Delete → appears in "Deleted stores" → Restore.
+  6. Log out → only the welcome card.
+
+**Result / follow-up (#016 below):** owner approved the components and asked for a different order.
+
+---
+
+### #016 — 2026-11-19 — Layout reorder + compact full-width user bar
+
+**What (owner's request):** the Stores block moved from beside the user card to **under
+Analytics**; the user card now spans the full width in **one row**.
+
+New order, one full-width column:
+`UserCard → ActiveStoreSelect → ConnectionPanel → AnalyticsDashboard → StoresPanel → StoreList → MyInvitesPanel → TrashPanel`
+
+**How:**
+- `app/page.tsx`: removed the 3-column grid row and listed the blocks in the new order. Because each
+  block is self-contained (#015), **reordering is just moving JSX lines**. No logic changed.
+- `components/UserCard.tsx`: avatar · name · email · sub on one line (`flex flex-wrap items-center`),
+  "Log out" at the end. `flex-1` on the text group pushes the button to the right; `flex-wrap` lets it
+  wrap on phones instead of overflowing.
+- `components/StoresPanel.tsx`: dropped `h-full` (it no longer needs to match the user card's height).
+
+**Files:** `app/page.tsx`, `components/UserCard.tsx`, `components/StoresPanel.tsx`.
+**Verified:** `tsc` passes, lint 0 problems. **Needs you:** reload the page.
+
+---
+
+### #017 — 2026-11-19 — "Current store" block; create store + my invites move into "My stores"
+
+**What (owner's request):**
+- The **Stores** card is now **"Current store: <name>"** and only holds what's about the active
+  store: **Invite someone** + **Team** (members, and the invites this store has sent, with Revoke).
+- **Create store** moved into **"My stores"** (top of the card).
+- **"My pending invites"** (invites sent *to me*) moved into **"My stores"** as its last section, so
+  accepting an invite and seeing the store appear under "Member of" happen in the same card.
+
+**Interpretation note:** "pending invites" was read as *my incoming* invites. The current store's
+*outgoing* pending invites (Revoke) stayed in "Current store", next to the invite form they relate to.
+
+New order: `UserCard → ActiveStoreSelect → ConnectionPanel → AnalyticsDashboard →
+Current store (StoresPanel) → My stores (StoreList, incl. create + my invites) → Deleted stores`
+
+**How:**
+- `StoresPanel.tsx`: removed the create-store form, its state and the `onCreated` prop. The card
+  title is JSX: `Current store: <span>{name}</span>`. `activeStore` is now required (`Store`, not
+  `Store | undefined`), because the page only renders the block when a store is selected.
+- `StoreList.tsx`: gained the create-store form (`createStore`, `newName`) plus the `onCreated` and
+  `refreshKey` props, a Refresh button, and renders `<MyInvitesPanel>` at the bottom.
+- `MyInvitesPanel.tsx`: renders a **section** (`<div>` + `SectionTitle`) instead of its own `Card`,
+  because it now lives inside another card. Logic unchanged.
+- `app/page.tsx`: renders `StoresPanel` inside the `activeStore &&` block; `MyInvitesPanel` is no
+  longer rendered by the page directly.
+
+**Files:** `components/StoresPanel.tsx`, `components/StoreList.tsx`, `components/MyInvitesPanel.tsx`, `app/page.tsx`.
+**Verified:** `tsc` passes, lint 0 problems. **Needs you:** reload the page.
+
+---
+
+### #018 — 2026-11-19 — Clearer names for the two kinds of pending invites
+
+**Problem (owner):** two sections were both called "pending invites", but they're opposites.
+
+| Where | Old name | New name | What it is |
+|---|---|---|---|
+| Current store → Team (`TeamPanel.tsx`) | Pending invites | **Invites sent from this store** | OUTGOING: people this store invited who haven't accepted yet (Revoke) |
+| My stores (`MyInvitesPanel.tsx`) | My pending invites | **Invites for you** | INCOMING: stores that invited *you* (Accept) |
+
+Each heading now has a one-line explanation under it, and the empty states say what's empty
+("No invites waiting for a reply" / "Nobody has invited you to a store right now"). The confirmation
+after inviting now points to "My stores → Invites for you".
+
+**Files:** `components/TeamPanel.tsx`, `components/MyInvitesPanel.tsx`, `components/StoresPanel.tsx`.
+**Verified:** `tsc` passes, lint 0 problems.
+
+---
+
+### #019 — 2026-11-19 — Security check before committing the frontend overhaul
+
+**Asked by the owner:** "is there anything vulnerable in the repo?" Checked instead of assumed.
+
+**Repo contents: clean.**
+- No secrets in tracked files, new files or the **full git history** (scanned for WooCommerce
+  `ck_/cs_` keys, Auth0 client secret, JWTs, private keys, passwords). The only password ever
+  committed is the **local Docker** Postgres password (`woopulse`, also in `docker-compose.yml` by
+  design, useless outside this machine; see #001). `.env.local` is ignored. GitHub repo is **private**.
+- No personal data in tracked files: only placeholders (`email@example.com`, `google-oauth2|1234`).
+- Lesson from the scan itself: the first attempt silently matched nothing because folder names like
+  `[id]` broke the file list (`xargs`). It was re-run with a null-separated list (`tr '\n' '\0' | xargs -0`)
+  and checked against a known positive. **A security scan that finds nothing must be tested on
+  something it should find.**
+
+**Dependencies: known vulnerabilities (pre-existing, not introduced by this work).**
+`pnpm audit --prod`: 54 (4 critical, 25 high), almost all from **next 16.1.6** (fixed in ≥ 16.4.1) and
+packages it pulls in (sharp, postcss, nanoid, browserslist, source-map-js); `@auth0/nextjs-auth0`
+4.15 (fixed ≥ 4.18). `dotnet list package --vulnerable`: **Npgsql 8.0.0** (high, CVE-2024-32655,
+fixed ≥ 8.0.3), Newtonsoft.Json 11.0.1 (transitive, high), Microsoft.OpenApi 2.4.1 (via Swashbuckle, high).
+Risk today is low (local-only; the API validates the token on every request regardless of the Next.js
+middleware), but they must be fixed before the app is exposed. **Planned as the next step.**

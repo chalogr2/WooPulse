@@ -8,7 +8,8 @@ export async function GET() {
     return NextResponse.json({ loggedIn: false });
   }
 
-  const u: any = session.user;
+  // session.user is typed by the Auth0 SDK (sub, name, nickname, email...), so no "any" needed.
+  const u = session.user;
 
   return NextResponse.json({
     loggedIn: true,

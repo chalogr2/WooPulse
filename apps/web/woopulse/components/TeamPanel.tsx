@@ -3,13 +3,15 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { fetchJson, toApiError, type ApiError } from "@/lib/client-api";
+import type { Role } from "@/lib/types";
+import { Button, ErrorText, inputClass, muted, RoleBadge, SectionTitle, formatDate } from "@/components/ui";
 
 // Shapes returned by the API (see Dtos/MemberDtos.cs and Dtos/InvitationDtos.cs)
 type Member = {
   id: number;
   userSub: string;
   email: string | null;
-  role: "Owner" | "Admin" | "Member";
+  role: Role;
   joinedAtUtc: string;
   isMe: boolean;
 };
@@ -23,15 +25,15 @@ type PendingInvite = {
 
 type Props = {
   storeId: number;
-  /** Changes whenever the page reloads its data, telling this panel to reload too. */
-  refreshKey: number;
+  /** Changes whenever something elsewhere changed, telling this panel to reload. */
+  refreshKey: number | string;
   /** Called after "Leave store", so the page refreshes its store list. */
   onStoresChanged: () => void;
 };
 
 /**
  * What: the team of ONE store: members (change role / remove / leave) + pending invites (revoke).
- * Self-contained: it fetches its own data, so page.tsx only renders <TeamPanel storeId={...} />.
+ * Rendered INSIDE the Stores card (components/StoresPanel.tsx), so it has no card of its own.
  * Buttons are only SHOWN when the rules allow them. The API enforces the same rules
  * (MemberService), so hiding a button is only for convenience, never for security.
  */
@@ -64,7 +66,7 @@ export default function TeamPanel({ storeId, refreshKey, onStoresChanged }: Prop
     }
   }, [storeId]);
 
-  // Load on mount, when the active store changes, or when the page signals a refresh.
+  // Load on mount, when the active store changes, or when the parent signals a refresh.
   useEffect(() => {
     void load(); // "void" = we intentionally don't await the promise here
   }, [load, refreshKey]);
@@ -109,55 +111,60 @@ export default function TeamPanel({ storeId, refreshKey, onStoresChanged }: Prop
     !m.isMe && (myRole === "Owner" || (myRole === "Admin" && m.role === "Member"));
 
   return (
-    <div style={{ border: "1px solid #333", padding: 12, borderRadius: 8, marginBottom: 12 }}>
-      <div style={{ fontWeight: 700, marginBottom: 8 }}>Team of active store</div>
+    <div>
+      <ErrorText error={error} />
 
-      {error && (
-        <div style={{ color: "#ff6b6b", marginBottom: 8 }}>
-          {error.title ?? "Error"}: {error.detail ?? error.raw ?? `status ${error.status}`}
-        </div>
-      )}
+      <SectionTitle>Team</SectionTitle>
+      {/* divide-y: a hairline between rows (Tailwind) */}
+      <ul className="divide-y divide-[var(--viz-grid)]">
+        {members.map((m) => (
+          <li key={m.id} className="flex flex-wrap items-center gap-2 py-2">
+            <span className="min-w-0 flex-1 break-all text-sm">
+              {m.email ?? <span className={muted}>{m.userSub}</span>}
+              {m.isMe && <span className={muted}> (you)</span>}
+            </span>
 
-      {members.map((m) => (
-        <div key={m.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0", flexWrap: "wrap" }}>
-          <span style={{ minWidth: 260 }}>
-            {m.email ?? <span style={{ opacity: 0.6 }}>{m.userSub}</span>}
-            {m.isMe && <b> (you)</b>}
-          </span>
+            {/* Only the Owner can change roles, and never the Owner's own role */}
+            {myRole === "Owner" && m.role !== "Owner" ? (
+              <select
+                aria-label={`Role of ${m.email ?? m.userSub}`}
+                className={inputClass}
+                value={m.role === "Admin" ? 2 : 3}
+                disabled={busy}
+                onChange={(e) => changeRole(m, Number(e.target.value) as 2 | 3)}
+              >
+                <option value={2}>Admin</option>
+                <option value={3}>Member</option>
+              </select>
+            ) : (
+              <RoleBadge role={m.role} />
+            )}
 
-          {/* Only the Owner can change roles, and never the Owner's own role */}
-          {myRole === "Owner" && m.role !== "Owner" ? (
-            <select
-              value={m.role === "Admin" ? 2 : 3}
-              disabled={busy}
-              onChange={(e) => changeRole(m, Number(e.target.value) as 2 | 3)}
-            >
-              <option value={2}>Admin</option>
-              <option value={3}>Member</option>
-            </select>
-          ) : (
-            <span style={{ opacity: 0.8 }}>{m.role}</span>
-          )}
-
-          {canRemove(m) && <button disabled={busy} onClick={() => remove(m)}>Remove</button>}
-          {m.isMe && m.role !== "Owner" && <button disabled={busy} onClick={leave}>Leave store</button>}
-        </div>
-      ))}
+            {canRemove(m) && <Button variant="danger" disabled={busy} onClick={() => remove(m)}>Remove</Button>}
+            {m.isMe && m.role !== "Owner" && <Button disabled={busy} onClick={leave}>Leave store</Button>}
+          </li>
+        ))}
+      </ul>
 
       {canManage && (
-        <div style={{ marginTop: 12 }}>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>Pending invites</div>
+        <div className="mt-4">
+          {/* OUTGOING invites: sent FROM this store, not yet accepted (DEVLOG #018) */}
+          <SectionTitle>Invites sent from this store</SectionTitle>
+          <p className={`-mt-1 mb-2 text-xs ${muted}`}>
+            People you invited who haven&apos;t accepted yet. Revoke to cancel an invite.
+          </p>
           {invites.length === 0 ? (
-            <div style={{ opacity: 0.75 }}>None.</div>
+            <div className={`text-sm ${muted}`}>No invites waiting for a reply.</div>
           ) : (
-            invites.map((inv) => (
-              <div key={inv.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0" }}>
-                <span style={{ minWidth: 260 }}>{inv.email}</span>
-                <span style={{ opacity: 0.8 }}>{inv.role}</span>
-                <span style={{ fontSize: 12, opacity: 0.7 }}>expires {inv.expiresAtUtc ?? "never"}</span>
-                <button disabled={busy} onClick={() => revoke(inv)}>Revoke</button>
-              </div>
-            ))
+            <ul className="divide-y divide-[var(--viz-grid)]">
+              {invites.map((inv) => (
+                <li key={inv.id} className="flex flex-wrap items-center gap-2 py-2">
+                  <span className="min-w-0 flex-1 break-all text-sm">{inv.email}</span>
+                  <span className={`text-xs ${muted}`}>{inv.role} · expires {formatDate(inv.expiresAtUtc) || "never"}</span>
+                  <Button disabled={busy} onClick={() => revoke(inv)}>Revoke</Button>
+                </li>
+              ))}
+            </ul>
           )}
         </div>
       )}

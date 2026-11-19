@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchJson, toApiError, type ApiError } from "@/lib/client-api";
+import type { Role } from "@/lib/types";
+import { Button, Card, ErrorText, formatDateTime, inputClass, muted } from "@/components/ui";
 
 // Matches Dtos/ConnectionDtos.cs → StoreConnectionDto
 type Connection = {
@@ -21,8 +23,6 @@ type Connection = {
   initialSyncDone: boolean;
   orderCount: number;
 };
-
-type Role = "Owner" | "Admin" | "Member";
 
 type Props = {
   storeId: number;
@@ -151,106 +151,119 @@ export default function ConnectionPanel({ storeId, myRole, refreshKey, onSynced 
     setEditing(true);
   };
 
-  const box = { border: "1px solid #333", padding: 12, borderRadius: 8, marginBottom: 12 } as const;
-  //  ^ "as const" tells TypeScript these values are fixed literals (fine for a style object).
-
-  if (conn === undefined && !error) return <div style={box}>Loading WooCommerce connection…</div>;
+  if (conn === undefined && !error) {
+    return <Card title="WooCommerce connection"><div className={`text-sm ${muted}`}>Loading…</div></Card>;
+  }
 
   return (
-    <div style={box}>
-      <div style={{ fontWeight: 700, marginBottom: 8 }}>WooCommerce connection</div>
-
-      {error && (
-        <div style={{ color: "#ff6b6b", marginBottom: 8, whiteSpace: "pre-wrap" }}>
-          {error.title ?? "Error"}: {error.detail ?? error.raw ?? `status ${error.status}`}
-        </div>
-      )}
+    <Card title="WooCommerce connection">
+      <ErrorText error={error} />
 
       {/* Connected: status */}
       {conn && !editing && (
-        <div>
+        <div className="grid gap-4 md:grid-cols-2">
+          {/* Left: the connection itself */}
           <div>
-            {conn.lastTestOk ? "🟢" : "🔴"} <b>{conn.shopUrl}</b>{" "}
-            <span style={{ opacity: 0.7 }}>key {conn.keyHint}</span>
-          </div>
-          <div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>
-            {conn.lastTestMessage}
-            {conn.lastTestedAtUtc && ` (checked ${new Date(conn.lastTestedAtUtc).toLocaleString()})`}
-          </div>
-          {/* Sync status */}
-          <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid #333" }}>
-            <div>
-              <b>{conn.orderCount.toLocaleString()}</b> orders synced
-              {syncing && <span> · ⏳ syncing…{!conn.initialSyncDone && " (first full sync, this can take a few minutes)"}</span>}
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Status = icon + text, never color alone */}
+              <span aria-hidden="true">{conn.lastTestOk ? "🟢" : "🔴"}</span>
+              <span className="font-semibold break-all">{conn.shopUrl}</span>
+              <span className={`text-xs ${muted}`}>key {conn.keyHint}</span>
             </div>
-            {!syncing && conn.lastSyncMessage && (
-              <div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>
-                {conn.lastSyncOk ? "✅" : "⚠️"} {conn.lastSyncMessage}
-                {conn.lastSyncCompletedAtUtc && ` (${new Date(conn.lastSyncCompletedAtUtc).toLocaleString()})`}
-              </div>
-            )}
-            {!syncing && !conn.lastSyncMessage && (
-              <div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>Not synced yet.</div>
+            <p className={`mt-1 text-xs ${muted}`}>
+              {conn.lastTestMessage}
+              {conn.lastTestedAtUtc && ` (checked ${formatDateTime(conn.lastTestedAtUtc)})`}
+            </p>
+          </div>
+
+          {/* Right: sync status */}
+          <div>
+            <div className="text-sm">
+              <b>{conn.orderCount.toLocaleString()}</b> orders synced
+              {syncing && (
+                <span className={muted}>
+                  {" "}· ⏳ syncing…{!conn.initialSyncDone && " (first full sync, this can take a few minutes)"}
+                </span>
+              )}
+            </div>
+            {!syncing && (
+              <p className={`mt-1 text-xs ${muted}`}>
+                {conn.lastSyncMessage
+                  ? `${conn.lastSyncOk ? "✅" : "⚠️"} ${conn.lastSyncMessage}${conn.lastSyncCompletedAtUtc ? ` (${formatDateTime(conn.lastSyncCompletedAtUtc)})` : ""}`
+                  : "Not synced yet."}
+              </p>
             )}
           </div>
 
-          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+          <div className="flex flex-wrap gap-2 md:col-span-2">
             {/* Any member can sync (owner decision #011) */}
-            <button disabled={busy || syncing} onClick={syncNow}>{syncing ? "Syncing…" : "Sync now"}</button>
-            {canTest && <button disabled={busy} onClick={test}>{busy ? "Testing…" : "Test connection"}</button>}
-            {isOwner && <button disabled={busy} onClick={startEditing}>Change keys</button>}
-            {isOwner && <button disabled={busy} onClick={disconnect}>Disconnect</button>}
+            <Button variant="primary" disabled={busy || syncing} onClick={syncNow}>
+              {syncing ? "Syncing…" : "Sync now"}
+            </Button>
+            {canTest && <Button disabled={busy} onClick={test}>{busy ? "Testing…" : "Test connection"}</Button>}
+            {isOwner && <Button disabled={busy} onClick={startEditing}>Change keys</Button>}
+            {isOwner && <Button variant="danger" disabled={busy} onClick={disconnect}>Disconnect</Button>}
           </div>
         </div>
       )}
 
       {/* Not connected, and not the owner */}
       {conn === null && !isOwner && (
-        <div style={{ opacity: 0.8 }}>Not connected yet. Ask the store owner to connect WooCommerce.</div>
+        <p className={`text-sm ${muted}`}>Not connected yet. Ask the store owner to connect WooCommerce.</p>
       )}
 
       {/* Owner: connect form (first time, or "Change keys") */}
       {isOwner && (conn === null || editing) && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, maxWidth: 460 }}>
-          <div style={{ fontSize: 12, opacity: 0.8 }}>
-            In WordPress: <b>WooCommerce → Settings → Advanced → REST API → Add key</b>, with
-            Permissions set to <b>Read</b>. Paste the key and secret here. They are encrypted before being saved.
-          </div>
+        <form
+          className="flex max-w-xl flex-col gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void save();
+          }}
+        >
+          <p className={`text-xs ${muted}`}>
+            In WordPress: <b>WooCommerce → Settings → Advanced → REST API → Add key</b>, with Permissions set
+            to <b>Read</b>. Paste the key and secret here. They are encrypted before being saved.
+          </p>
           <input
+            aria-label="Shop URL"
+            className={inputClass}
             value={shopUrl}
             onChange={(e) => setShopUrl(e.target.value)}
             placeholder="https://yourshop.com"
-            style={{ padding: 8 }}
             disabled={busy}
           />
           <input
+            aria-label="Consumer key"
+            className={inputClass}
             value={consumerKey}
             onChange={(e) => setConsumerKey(e.target.value)}
             placeholder="Consumer key (ck_...)"
-            style={{ padding: 8 }}
             autoComplete="off"
             disabled={busy}
           />
           <input
+            aria-label="Consumer secret"
             type="password"
+            className={inputClass}
             value={consumerSecret}
             onChange={(e) => setConsumerSecret(e.target.value)}
             placeholder="Consumer secret (cs_...)"
-            style={{ padding: 8 }}
             autoComplete="new-password"
             disabled={busy}
           />
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
+          <div className="flex gap-2">
+            <Button
+              type="submit"
+              variant="primary"
               disabled={busy || !shopUrl.trim() || !consumerKey.trim() || !consumerSecret.trim()}
-              onClick={save}
             >
               {busy ? "Testing & saving…" : "Save & test"}
-            </button>
-            {editing && <button disabled={busy} onClick={() => setEditing(false)}>Cancel</button>}
+            </Button>
+            {editing && <Button type="button" disabled={busy} onClick={() => setEditing(false)}>Cancel</Button>}
           </div>
-        </div>
+        </form>
       )}
-    </div>
+    </Card>
   );
 }
