@@ -1,6 +1,7 @@
 @WooPulse.Api_HostAddress = http://localhost:5113
 
-GET {{WooPulse.Api_HostAddress}}/weatherforecast/
+# Health check (no login needed)
+GET {{WooPulse.Api_HostAddress}}/health
 Accept: application/json
 
 ###

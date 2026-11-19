@@ -585,3 +585,204 @@ reported.
      longer available." (that's the early check; the "already used" message only appears
      when two requests arrive at the *same instant*, which is hard to trigger by hand).
   4. API console: the heartbeat line shows a **different time each minute**.
+
+**Result:** confirmed working by the owner. Committed as `38fc42d`.
+
+---
+
+### #009 — 2026-11-19 — `Program.cs` split into Setup/ and Endpoints/ + `StoreMember.Email`
+
+**What:** `Program.cs` went from ~390 lines to ~60. All service configuration moved to
+`Setup/`, all endpoints moved to `Endpoints/` (one file per feature), and the identity
+helpers moved to `Security/`. **The HTTP routes and their behavior are unchanged.** Also
+added an `Email` column to `StoreMember` so the upcoming members list is readable.
+
+**Why:** the owner's direction: a minimal `Program.cs` and one responsibility per file
+(DDD-inspired, applied pragmatically). It also makes Step 1B (7 new endpoints) and Step 2
+(analytics) land in their own files instead of growing one big file.
+
+**New layout of `apps/api/WooPulse.Api`:**
+```
+Program.cs                   ← table of contents: services → middleware → jobs → endpoints
+Setup/
+  DatabaseSetup.cs           AddWooPulseDatabase()   EF Core + Npgsql
+  AuthSetup.cs               AddWooPulseAuth()       Auth0 JWT validation + (unused) policies
+  HangfireSetup.cs           AddWooPulseHangfire(), UseWooPulseHangfireDashboard(),
+                             RegisterWooPulseRecurringJobs()
+  AppServicesSetup.cs        AddWooPulseServices()   StoreService, MaintenanceService, CORS
+Endpoints/
+  SystemEndpoints.cs         /, /health, /me
+  StoreEndpoints.cs          /stores, /stores/{id}, /stores/deleted
+  InviteEndpoints.cs         /stores/{id}/invites, /invites/mine, /invites/accept
+  DevEndpoints.cs            /debug/claims, /invites/mine/debug, /jobs/*  (Development only)
+Security/
+  ClaimsPrincipalExtensions.cs   user.GetSub(), user.GetEmail()
+Data/ Dtos/ Services/ Validation/ Migrations/   (unchanged structure)
+```
+
+**The C# techniques used (each one is standard ASP.NET Core practice):**
+
+1. **Extension methods.** `public static IServiceCollection AddWooPulseAuth(this IServiceCollection services, ...)`.
+   The `this` keyword on the first parameter lets you call a static method as if it were
+   an instance method: `builder.Services.AddWooPulseAuth(...)`. That's exactly how
+   Microsoft's own `AddAuthentication()` and `AddHangfire()` are written.
+2. **Route groups.** `var group = app.MapGroup("/stores").RequireAuthorization();`. Every route
+   on `group` gets the `/stores` prefix and the auth requirement, declared once.
+3. **Binding `ClaimsPrincipal` directly.** Handlers now take `ClaimsPrincipal user` instead of
+   `HttpContext ctx`. ASP.NET fills it with the logged-in user. Asking only for what you need
+   makes a handler's dependencies obvious.
+4. **Dev endpoints mapped conditionally.** `if (app.Environment.IsDevelopment()) app.MapDevEndpoints();`
+   Before, every debug handler checked `IsDevelopment()` itself, and a new route could forget
+   to. Now, outside dev, those routes are never registered at all.
+5. **`return error ?? Results.Ok(dto);`**. `??` (null-coalescing) returns the left side if it
+   isn't null, otherwise the right. It replaces the two-line `if (error is not null) return error;`.
+
+**Bug fixed (introduced by #003, never triggered locally):** recurring jobs were registered
+with Hangfire's *static* `RecurringJob.AddOrUpdate`. That needs a global `JobStorage.Current`,
+which in this app was only set as a side effect of `UseHangfireDashboard`. #003 made the
+dashboard Development-only, so **outside Development the API would have crashed at
+startup.** Now `RegisterWooPulseRecurringJobs()` asks DI for `IRecurringJobManager`, which
+is always wired to the Postgres storage. Lesson: avoid static/global state; take
+dependencies from DI so they're explicit.
+
+**Removed:** the `/weatherforecast` template endpoint and its `WeatherForecast` record
+(finding C1); `WooPulse.Api.http` now calls `/health`. Also dropped one duplicate claim
+lookup in `GetEmail` (`ClaimTypes.Email` *is* the `http://schemas.xmlsoap.org/...` URI).
+
+**Small ordering change:** `UseHttpsRedirection()` now runs right after the exception
+handler (the conventional spot) instead of after the job registration. No effect locally:
+the `http` launch profile has no HTTPS port, so it does nothing.
+
+**`StoreMember.Email`:**
+- `Data/StoreMember.cs`: new `string? Email` (nullable: old rows have none yet).
+- Filled when a store is **created** (`CreateAsync(sub, email, req)`, owner's email from the token)
+  and when an invite is **accepted** (`normEmail`, already verified to match the invite).
+- **Backfill for existing rows:** `StoreService.SyncMemberEmailAsync(sub, email)` runs on every
+  `GET /stores`. It's a single `UPDATE ... WHERE UserSub = @sub AND (Email IS NULL OR Email <> @email)`,
+  so it normally changes 0 rows. It also keeps emails right if a user changes theirs in Auth0.
+- Migration: `AddStoreMemberEmail` (adds one nullable `text` column; no data loss).
+
+**Files:** `Program.cs` (rewritten), new `Setup/*.cs` (4), new `Endpoints/*.cs` (4), new
+`Security/ClaimsPrincipalExtensions.cs`, `Data/StoreMember.cs`, `Services/StoreService.cs`,
+`WooPulse.Api.http`, `Migrations/*_AddStoreMemberEmail*` (generated).
+
+**How to verify:**
+- Done: API compiles (0 warnings, 0 errors).
+- Pending: generate + apply the migration (needs the running API stopped, because it locks `bin/`).
+- **Needs you:** restart the API; click through the whole app as before (list, create, rename,
+  delete, invite, accept). Behavior should be identical. `/hangfire` and `/swagger` still work.
+
+**Result:** the owner ran `dotnet ef migrations add AddStoreMemberEmail` and
+`dotnet ef database update` and confirmed the app works. Checked: migration
+`20261119164051_AddStoreMemberEmail` is in `__EFMigrationsHistory`, `StoreMembers.Email`
+exists and is nullable, and the backfill already filled 8 of 12 rows.
+
+---
+
+### #010 — 2026-11-19 — Step 1B: team management, invite revoke, restore deleted stores
+
+**What:** the remaining team/store features of MVP goal 1, end to end
+(API → BFF route → UI).
+
+**New API endpoints**
+
+| Method + route | Who | Service method |
+|---|---|---|
+| `GET /stores/{storeId}/members` | any member | `MemberService.ListAsync` |
+| `PUT /stores/{storeId}/members/{memberId}` body `{ role: 2\|3 }` | Owner; not on the Owner | `MemberService.ChangeRoleAsync` |
+| `DELETE /stores/{storeId}/members/{memberId}` | Owner: anyone but self · Admin: Members only | `MemberService.RemoveAsync` |
+| `POST /stores/{storeId}/leave` | anyone but the Owner | `MemberService.LeaveAsync` |
+| `GET /stores/{storeId}/invites` | Owner/Admin | `StoreService.ListStoreInvitesAsync` |
+| `POST /stores/{storeId}/invites/{inviteId}/revoke` | Owner/Admin | `StoreService.RevokeInviteAsync` |
+| `POST /stores/{id}/restore` | Owner | `StoreService.RestoreAsync` |
+
+**Status codes used, and why:**
+- **404** when you're not a member, or the thing doesn't exist. We never answer 403 to
+  outsiders, because a 403 would confirm the store exists.
+- **403** when you *are* a member but your role doesn't allow it (with a `detail` message).
+- **400** for invalid input or impossible actions (remove yourself, change the Owner's role).
+- **409** for a state conflict (Owner tries to leave; invite no longer pending).
+- **204 No Content** for successful actions that return nothing (remove, leave, revoke).
+
+**Design decisions:**
+1. **New `MemberService`** (`Services/MemberService.cs`) instead of growing `StoreService`.
+   Team rules are their own concern inside the Store domain (the DDD idea: group code by
+   business concept). Invite and restore methods stayed in `StoreService`, next to the
+   invite/delete code they mirror.
+2. **`db.FindMembershipAsync(storeId, sub)`** (`Data/MembershipQueries.cs`), an extension
+   method on `AppDbContext`. Nearly every rule starts with "what's my membership in this
+   store?", so it's defined once. Because of the query filter it returns `null` for
+   soft-deleted stores, so those automatically 404.
+3. **Revoke uses the conditional-UPDATE pattern** from #008:
+   `WHERE Id = @id AND Status = Pending`. An invite accepted a split second earlier can't be
+   flipped to Revoked; you get a 409 instead.
+4. **Revoke is `POST .../revoke`, not `DELETE`**: the row isn't deleted, its status changes
+   and it stays as an audit record. REST convention: use DELETE only when the resource is
+   actually removed.
+5. **Restore** loads with `IgnoreQueryFilters()` (deleted stores are hidden by default), checks
+   Owner, clears the `Deleted*` fields and records `UpdatedAtUtc/By`. After the 30-day
+   purge job runs, the store is gone and restore returns 404.
+6. **The Owner can't leave**, so a store always has an owner. Ownership transfer is out of
+   MVP scope.
+
+**C# syntax introduced:**
+- `newRole is not (StoreRole.Admin or StoreRole.Member)`: pattern matching with `or`/`not` (C# 9).
+- `me.Role switch { StoreRole.Owner => true, StoreRole.Admin => ..., _ => false }`: a switch
+  *expression* that returns a value; `_` means "anything else".
+- `condition ? a : b`: ternary operator (in `RevokeInviteAsync`).
+- `public MemberService(AppDbContext db) => _db = db;`: expression-bodied constructor.
+- Route parameter in a group prefix: `MapGroup("/stores/{storeId:int}/members")` binds
+  `int storeId` in every handler of the group.
+
+**BFF routes** (`app/api/stores/...`, each a few lines using `proxyToApi`):
+`deleted/route.ts` (GET), `[id]/members/route.ts` (GET), `[id]/members/[memberId]/route.ts`
+(PUT, DELETE), `[id]/leave/route.ts` (POST), `[id]/invites/route.ts` (added GET),
+`[id]/invites/[inviteId]/revoke/route.ts` (POST), `[id]/restore/route.ts` (POST).
+Next.js routing note: the static folder `deleted/` wins over the dynamic `[id]/`, so
+`/api/stores/deleted` never reaches the `[id]` route.
+
+**UI (first real components, MVP goal 3 groundwork):**
+- `lib/client-api.ts`: `fetchJson` and `ApiError` moved out of `page.tsx`, plus a new
+  `toApiError(e: unknown)`. It replaces `catch (e: any)` with a typed check, which is the
+  lint-clean way to handle errors in TypeScript.
+- `components/TeamPanel.tsx`: members of the active store (role dropdown, Remove, Leave)
+  and pending invites (Revoke). It's **self-contained**: it fetches its own data from
+  `storeId`. Buttons are shown according to the same rules as the API, but **hiding a button
+  is UX, not security**; the API enforces the rules regardless.
+- `components/TrashPanel.tsx`: deleted stores with "permanently deleted in N days" and
+  Restore (shown only for stores you own). It renders nothing when the trash is empty.
+- `page.tsx` changes:
+  - imports `fetchJson` from `lib/`;
+  - renders the two panels;
+  - new `dataVersion` counter, bumped after each successful `load()`. The panels receive it as
+    `refreshKey` and reload when it changes. It's a simple way for a parent to tell
+    self-contained children "data changed".
+  - **bug fix:** the active store now resets to the first store if it disappears from the
+    list (after you leave or delete it). Before, the old id stayed selected. It uses the
+    functional form `setActiveStoreId(current => ...)`, which reads the latest state
+    instead of the value captured when `load` was created (a "stale closure").
+
+**React concepts used:** `useCallback` keeps `load` the same function between renders
+(unless `storeId` changes), so `useEffect(..., [load, refreshKey])` re-runs only when it
+should and doesn't loop.
+
+**Files:** API: new `Dtos/MemberDtos.cs`, `Data/MembershipQueries.cs`,
+`Services/MemberService.cs`, `Endpoints/MemberEndpoints.cs`; changed
+`Services/StoreService.cs`, `Endpoints/StoreEndpoints.cs`, `Endpoints/InviteEndpoints.cs`,
+`Setup/AppServicesSetup.cs`, `Program.cs`. Web: new `lib/client-api.ts`,
+`components/TeamPanel.tsx`, `components/TrashPanel.tsx`, 6 new route files + 1 changed; `app/page.tsx`.
+No database migration needed.
+
+**How to verify:**
+- Done: API compiles (0 warnings, 0 errors); `tsc` passes; the new files have no lint
+  problems (total lint dropped 20 → 18, all in older `page.tsx`/`profile` code).
+  Logged out, all 8 new BFF routes return 401 (they exist and require login).
+- **Needs you** (restart the API; two browsers or a normal + incognito window help):
+  1. Owner: Team panel lists members with emails; change a member to Admin and back.
+  2. Owner: Remove a member. Admin: try removing another Admin → no button (and the API
+     would 403). Admin can remove a Member.
+  3. Member: "Leave store" → the store disappears from their list. Owner: no Leave button.
+  4. Owner/Admin: invite someone → it shows under "Pending invites" → Revoke → it
+     disappears, and the invitee can no longer accept it.
+  5. Owner: delete a store → it shows in Trash with "permanently deleted in 30 days" →
+     Restore → it's back in the list.

@@ -127,6 +127,9 @@ namespace WooPulse.Api.Migrations
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("Email")
+                        .HasColumnType("text");
+
                     b.Property<int>("Role")
                         .HasColumnType("integer");
 

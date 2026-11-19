@@ -56,6 +56,23 @@ public class StoreService
             .ToListAsync();
     }
 
+    // What: copy the caller's current email onto all their memberships, if it changed.
+    // Why: StoreMember.Email was added later (DEVLOG #009); this backfills old rows, and keeps
+    //      them correct if the user changes their email in Auth0.
+    // How: ExecuteUpdateAsync = ONE SQL UPDATE, no entities loaded. The WHERE skips rows that
+    //      are already correct, so normally 0 rows change and it's very cheap.
+    //      IgnoreQueryFilters(): memberships of soft-deleted stores get updated too, so a
+    //      restored store shows the right email.
+    public async Task SyncMemberEmailAsync(string sub, string? email)
+    {
+        if (email is null) return;
+
+        await _db.StoreMembers
+            .IgnoreQueryFilters()
+            .Where(m => m.UserSub == sub && (m.Email == null || m.Email != email))
+            .ExecuteUpdateAsync(set => set.SetProperty(m => m.Email, email));
+    }
+
     // What: get store by id if owned
     // Why: standard CRUD & prevents id-guessing
     public async Task<StoreDto?> GetAsync(string sub, int id)
@@ -68,7 +85,8 @@ public class StoreService
 
     // What: create store with validation + audit fields
     // Why: consistent validation + creator/owner tracking
-    public async Task<(StoreDto? dto, IResult? error)> CreateAsync(string sub, CreateStoreRequestDto req)
+    // email: the creator's email from the token (may be null) → stored on the Owner membership.
+    public async Task<(StoreDto? dto, IResult? error)> CreateAsync(string sub, string? email, CreateStoreRequestDto req)
     {
         var name = StoreValidation.NormalizeName(req.Name);
         if (name is null || !StoreValidation.IsValidName(name))
@@ -88,9 +106,10 @@ public class StoreService
             CreatedBySub = sub
         };
 
-         store.Members.Add(new StoreMember
+        store.Members.Add(new StoreMember
         {
             UserSub = sub,
+            Email = email,
             Role = StoreRole.Owner
         });
 
@@ -326,6 +345,7 @@ public class StoreService
             {
                 StoreId = inv.StoreId,
                 UserSub = sub,
+                Email = normEmail,   // the invite's email == the token's email (checked above)
                 Role = inv.Role,
                 CreatedAtUtc = now
             });
@@ -362,5 +382,91 @@ public class StoreService
                 i.CreatedAtUtc,
                 i.ExpiresAtUtc))
             .ToListAsync();
+    }
+
+    // ---------------------------------------------------------------------
+    // Step 1B (DEVLOG #010): invite management + restore
+    // ---------------------------------------------------------------------
+
+    // What: pending (not expired) invites of ONE store, for its Owner/Admins
+    // Why: so they can see who's been invited and revoke mistakes
+    public async Task<(List<InvitationDto>? invites, IResult? error)> ListStoreInvitesAsync(string sub, int storeId)
+    {
+        var me = await _db.FindMembershipAsync(storeId, sub);
+        if (me is null) return (null, Results.NotFound());
+        if (!CanWrite(me.Role))
+            return (null, Results.Problem("Not allowed", "Only owners and admins can see pending invites.", statusCode: 403));
+
+        var now = DateTimeOffset.UtcNow;
+        var invites = await _db.StoreInvitations
+            .Where(i => i.StoreId == storeId
+                     && i.Status == InvitationStatus.Pending
+                     && (i.ExpiresAtUtc == null || i.ExpiresAtUtc > now))
+            .OrderByDescending(i => i.CreatedAtUtc)
+            .Select(i => new InvitationDto(
+                i.Id, i.StoreId, i.Store.Name, i.Email,
+                i.Role.ToString(), i.Status.ToString(),
+                i.CreatedAtUtc, i.ExpiresAtUtc))
+            .ToListAsync();
+
+        return (invites, null);
+    }
+
+    // What: revoke a pending invite (Owner/Admin). The token stops working immediately.
+    // How: same "conditional UPDATE" pattern as AcceptInviteAsync. WHERE Status = Pending
+    //      means an invite accepted a millisecond earlier can't be flipped to Revoked.
+    public async Task<IResult?> RevokeInviteAsync(string sub, int storeId, int inviteId)
+    {
+        var me = await _db.FindMembershipAsync(storeId, sub);
+        if (me is null) return Results.NotFound();
+        if (!CanWrite(me.Role))
+            return Results.Problem("Not allowed", "Only owners and admins can revoke invites.", statusCode: 403);
+
+        var exists = await _db.StoreInvitations.AnyAsync(i => i.Id == inviteId && i.StoreId == storeId);
+        if (!exists) return Results.NotFound();
+
+        var now = DateTimeOffset.UtcNow;
+        var updated = await _db.StoreInvitations
+            .IgnoreQueryFilters()   // membership above already proved the store isn't deleted
+            .Where(i => i.Id == inviteId && i.StoreId == storeId && i.Status == InvitationStatus.Pending)
+            .ExecuteUpdateAsync(set => set
+                .SetProperty(i => i.Status, InvitationStatus.Revoked)
+                .SetProperty(i => i.RespondedAtUtc, now)
+                .SetProperty(i => i.RespondedBySub, sub));
+
+        return updated == 0
+            ? Results.Problem("Invite not pending", "This invite was already accepted, revoked or expired.", statusCode: 409)
+            : null;
+        // ^ ternary operator: condition ? valueIfTrue : valueIfFalse
+    }
+
+    // What: undo a soft delete (Owner only), while the store is still in the trash.
+    // Note: the daily purge job hard-deletes stores 30 days after deletion; after that
+    //       there is nothing to restore (404).
+    public async Task<(StoreDto? dto, IResult? error)> RestoreAsync(string sub, int storeId)
+    {
+        // IgnoreQueryFilters: deleted stores are hidden by default. It also applies to the
+        // Include, so we get the members of the deleted store too.
+        var store = await _db.Stores
+            .IgnoreQueryFilters()
+            .Include(s => s.Members)
+            .SingleOrDefaultAsync(s => s.Id == storeId && s.IsDeleted);
+
+        if (store is null) return (null, Results.NotFound());
+
+        var member = store.Members.SingleOrDefault(m => m.UserSub == sub);
+        if (member is null) return (null, Results.NotFound());
+
+        if (member.Role != StoreRole.Owner)
+            return (null, Results.Problem("Owner only", "Only the store owner can restore a store.", statusCode: 403));
+
+        store.IsDeleted = false;
+        store.DeletedAtUtc = null;
+        store.DeletedBySub = null;
+        store.UpdatedAtUtc = DateTimeOffset.UtcNow;   // restoring counts as an update (audit)
+        store.UpdatedBySub = sub;
+
+        await _db.SaveChangesAsync();
+        return (ToDto(store), null);
     }
 }

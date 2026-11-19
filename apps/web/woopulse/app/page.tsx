@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { fetchJson, type ApiError } from "@/lib/client-api";
+import TeamPanel from "@/components/TeamPanel";
+import TrashPanel from "@/components/TrashPanel";
 
 type Health = { status: string; utc: string };
 type Store = {
@@ -16,13 +19,6 @@ type Store = {
   deletedBySub?: string | null;
 };
 
-type ApiError = {
-  status: number;
-  title?: string;
-  detail?: string;
-  raw?: string;
-};
-
 type InvitationDebug = {
   id: number;
   storeId: number;
@@ -35,42 +31,7 @@ type InvitationDebug = {
   expiresAtUtc?: string | null;
 };
 
-async function fetchJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
-  const res = await fetch(input, { cache: "no-store", ...init });
-
-  const contentType = res.headers.get("content-type") ?? "";
-  const text = await res.text();
-
-  // success
-  if (res.ok) {
-    if (!text) return undefined as unknown as T;
-    return contentType.includes("application/json")
-      ? (JSON.parse(text) as T)
-      : ((text as unknown) as T);
-  }
-
-  // error
-  let problem: any = null;
-  if (contentType.includes("application/json") && text) {
-    try { problem = JSON.parse(text); } catch {}
-  }
-
-  const err: ApiError = {
-    status: res.status,
-    title: problem?.title,
-    detail: problem?.detail,
-    raw: text,
-  };
-
-  // throw a real Error but attach structured info
-  const e = new Error(
-    problem?.detail ||
-      problem?.title ||
-      `Request failed (${res.status})`
-  ) as Error & { api?: ApiError };
-  e.api = err;
-  throw e;
-}
+// fetchJson + ApiError now live in lib/client-api.ts (shared with components/).
 
 export default function Home() {
   const [health, setHealth] = useState<Health | null>(null);
@@ -81,6 +42,8 @@ export default function Home() {
   const [error, setError] = useState<ApiError | null>(null);
   const [activeStoreId, setActiveStoreId] = useState<number | null>(null);
   const [invites, setInvites] = useState<InvitationDebug[]>([]);
+  // Bumped after every successful load(); the panels watch it and reload themselves.
+  const [dataVersion, setDataVersion] = useState(0);
 
   type Invitation = {
   id: number;
@@ -114,10 +77,14 @@ export default function Home() {
       setHealth(h);
       setStores(storesData);
 
-      // Initialize active store once, after stores load
-      if (storesData.length && activeStoreId == null) {
-        setActiveStoreId(storesData[0].id);
-      }
+      // Keep the active store if it's still in the list; otherwise (first load, or I just
+      // left/deleted it) pick the first store, or null if I have none.
+      // Functional form setX(current => next) reads the LATEST state, not the value
+      // captured when this function was created.
+      setActiveStoreId((current) =>
+        storesData.some((s) => s.id === current) ? current : storesData[0]?.id ?? null
+      );
+      setDataVersion((v) => v + 1);
     } catch (e: any) {
       console.error("LOAD FAILED:", e?.message ?? e);
 
@@ -416,6 +383,11 @@ export default function Home() {
         )}
       </div>
 
+      {/* Team of the active store (components/TeamPanel.tsx). "cond && <X/>" renders X only if cond is truthy. */}
+      {activeStoreId != null && (
+        <TeamPanel storeId={activeStoreId} refreshKey={dataVersion} onStoresChanged={load} />
+      )}
+
       {/* My invites */}
       <div style={{ border: "1px solid #333", padding: 12, borderRadius: 8, marginBottom: 12 }}>
         <div style={{ fontWeight: 700, marginBottom: 8 }}>My pending invites</div>
@@ -518,6 +490,9 @@ export default function Home() {
           </div>
         </div>
       ))}
+
+      {/* Soft-deleted stores with Restore (components/TrashPanel.tsx) */}
+      <TrashPanel mySub={auth?.sub} refreshKey={dataVersion} onStoresChanged={load} />
     </main>
   );
 }
