@@ -20,4 +20,9 @@
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.4" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Lets the test project reach "internal" helpers (shop URL normalizing, key decryption). -->
+    <InternalsVisibleTo Include="WooPulse.Api.Tests" />
+  </ItemGroup>
+
 </Project>

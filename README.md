@@ -101,6 +101,8 @@ apps/
       Data/                     EF Core entities and DbContext
       Dtos/                     request and response shapes
       Migrations/               database schema history
+    WooPulse.Api.Tests/         xUnit tests for the services and the WooCommerce client
+    WooPulse.sln                API + tests, so `dotnet test` works from apps/api
   web/
     woopulse/
       app/                      page, layout and the BFF routes under app/api
@@ -164,13 +166,33 @@ pnpm dev
 
 Open `http://localhost:3000`, log in, create a store and connect it with a WooCommerce key (WooCommerce, Settings, Advanced, REST API, permission set to Read).
 
+## Tests
+
+```bash
+cd apps/api
+dotnet test
+```
+
+105 tests cover the business rules in `Services/` and the WooCommerce client, and run in about a second with no database, Docker or Auth0 setup. Each test gets a private SQLite database in memory, built from the real EF Core model (same query filters, unique indexes and cascade deletes), and a fake WooCommerce shop that records every request.
+
+| Area | What is checked |
+|---|---|
+| Tenancy and permissions | Strangers get 404, never 403. Owner, Admin and Member rules for renaming, deleting, restoring, inviting, changing roles, removing and leaving |
+| Invitations | Normalized emails, duplicates, expiry, wrong-account tokens, double accepts, revoke vs accept |
+| WooCommerce connection | Owner-only changes, HTTPS-only URLs, keys stored encrypted and never returned, keys tested before saving, switching shops wipes the old shop's orders |
+| Order sync | Paging, upsert without duplicates, shop-local dates, the per-store lock, failures recorded and the lock released |
+| Analytics | Revenue statuses, net revenue, the previous period, zero-filled days, monthly buckets, top products, tenant isolation |
+| WooCommerce client | Header auth with query-string fallback, escaped secrets, readable errors that never contain the keys |
+
+The suite was checked against deliberately introduced bugs (an admin allowed to remove admins, cancelled orders counted as revenue, UTC dates in daily charts, invites accepted from the wrong account, a secret stored unencrypted); each one failed at least one test. SQLite can't reproduce two requests racing on Postgres row locks, so the conditional UPDATEs that make invite accepts and sync locks race-safe are tested sequentially, not concurrently.
+
 ## Development log
 
 [`DEVLOG.md`](DEVLOG.md) records every addition and fix: what changed, why, how it works and how it was verified, including the bugs found along the way and how they were tracked down. It is written so a junior developer could pick up the project from it.
 
 ## Status
 
-The MVP is complete: teams, WooCommerce sync, analytics and the dashboard. Next on the list are dependency upgrades, automated tests for the permission rules and email delivery for invites.
+The MVP is complete: teams, WooCommerce sync, analytics and the dashboard. The API's business rules are covered by automated tests (see [Tests](#tests)). Next on the list are dependency upgrades and email delivery for invites.
 
 ## Built with Claude
 
