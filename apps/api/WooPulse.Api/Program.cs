@@ -115,10 +115,11 @@ if (app.Environment.IsDevelopment())
 app.UseAuthentication();
 app.UseAuthorization();
 
-// Smoke test background job
-RecurringJob.AddOrUpdate(
+// Smoke test background job. Calls a method (no arguments) so the time is read when the
+// job runs, not once at registration (see MaintenanceService.Heartbeat, DEVLOG #008).
+RecurringJob.AddOrUpdate<MaintenanceService>(
     "heartbeat",
-    () => Console.WriteLine($"Hangfire heartbeat: {DateTimeOffset.Now}"),
+    svc => svc.Heartbeat(),
     Cron.Minutely
 );
 

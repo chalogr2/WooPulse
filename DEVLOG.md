@@ -512,3 +512,76 @@ reported.
   the running one still has the old rules. Reload the page as the new user: the 403 should
   be gone and store 27 should appear. No Auth0 changes or re-login needed. The console
   warning should also be gone (Next.js reloads `layout.tsx` itself).
+
+**Result:** confirmed working by the owner. Committed as `ebf5210` with entries #001–#007.
+
+---
+
+### #008 — 2026-11-19 — Step 1A: fixes to existing store/invite features
+
+**What:** four fixes to features that already existed. No new endpoints (that's Step 1B).
+
+**1. Deleting a store is Owner-only** (`StoreService.SoftDeleteAsync`)
+- *Before:* `CanWrite(role)` → Owners **and Admins** could delete.
+- *After:* `member.Role != StoreRole.Owner` → 403 with a ProblemDetails body
+  `{ title: "Owner only", detail: "Only the store owner can delete a store." }`.
+  The UI's error box shows the `detail` text automatically.
+- Admins can still rename and invite (those still use `CanWrite`).
+
+**2. Invite lists show the store name and hide expired invites**
+(`ListMyInvitesAsync`, `ListMyInvitesDebugAsync`, both DTOs, `page.tsx`)
+- *Before:* expired invites stayed visible until the hourly job ran, and the UI showed
+  "Store #12".
+- *After:* the query also requires `ExpiresAtUtc == null || ExpiresAtUtc > now`, and each
+  DTO has a new `StoreName` field.
+- *How:* the queries now end in `.Select(i => new Dto(..., i.Store.Name, ...))` **before**
+  `.ToListAsync()`. That makes EF generate one SQL query with a JOIN to `Stores` and fetch only
+  the needed columns. The old code loaded full rows, then mapped them in memory.
+- `InvitationDto` is a **positional record**: its constructor parameters are its properties,
+  in order. Adding `StoreName` as the 3rd parameter meant updating every `new InvitationDto(...)`
+  call, and the compiler points out any you miss.
+- Frontend types fixed too: `role`/`status` are `string` (the API sends `"Member"`, not `3`).
+
+**3. Accepting an invite is race-safe** (`AcceptInviteAsync`)
+- *Problem:* two accept requests at the same moment (double-click, two tabs) could both read
+  `Status == Pending`. The transaction didn't prevent that, because Postgres's default
+  isolation level (*Read Committed*) lets both see the old value. Result: an unhandled 500
+  from the unique index, or two "successful" accepts.
+- *Fix:* **atomic conditional update** (a common pattern, sometimes called "claiming" a row):
+  ```csharp
+  var claimed = await _db.StoreInvitations
+      .IgnoreQueryFilters()
+      .Where(i => i.Id == inv.Id && i.Status == InvitationStatus.Pending)
+      .ExecuteUpdateAsync(set => set.SetProperty(i => i.Status, InvitationStatus.Accepted) ...);
+  if (claimed == 0) return 409;
+  ```
+  `ExecuteUpdateAsync` (EF Core 7+) runs **one** `UPDATE ... WHERE Status = Pending` directly in
+  the database, without loading the entity. The database guarantees only one request can
+  change that row from Pending; the second waits for the lock, re-checks the `WHERE`, and
+  updates 0 rows → **409 "This invite was already used."**
+- If we return early, `CommitAsync` never runs; `await using var tx` disposes the transaction
+  at the end of the method, which **rolls back** automatically.
+- The early checks (not found / not pending / expired / wrong email) are unchanged. They
+  give friendly error messages; the conditional update is the real guarantee.
+
+**4. Heartbeat job prints the real time** (`Program.cs`, `MaintenanceService.Heartbeat`)
+- *Problem:* Hangfire saves a job as *which method to call + its arguments, serialized to
+  JSON*. In `() => Console.WriteLine($"...{DateTimeOffset.Now}")` the argument is the finished
+  string, built **once** at registration, so every run printed the same timestamp.
+- *Fix:* the job calls `svc.Heartbeat()`, a method with **no arguments** that reads the clock
+  when it runs. **Rule of thumb:** with Hangfire, compute "now" *inside* the job, never in
+  the expression that registers it.
+
+**Files:** `Services/StoreService.cs`, `Services/MaintenanceService.cs`, `Program.cs`,
+`Dtos/InvitationDtos.cs`, `Dtos/InvitationDebugDtos.cs`, `apps/web/woopulse/app/page.tsx`.
+
+**How to verify:**
+- Done: API compiles (0 warnings, 0 errors), `tsc --noEmit` passes.
+- **Needs you** (restart the API first):
+  1. As an **Admin** member (not Owner) of a store, click Delete → red box "Only the store
+     owner can delete a store." As the Owner → deletes as before.
+  2. Invite someone → as that user, "Refresh invites (debug)" shows the **store name**.
+  3. Accept → store appears. Click Accept again on a stale button → 409 "This invite is no
+     longer available." (that's the early check; the "already used" message only appears
+     when two requests arrive at the *same instant*, which is hard to trigger by hand).
+  4. API console: the heartbeat line shows a **different time each minute**.

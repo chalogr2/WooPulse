@@ -13,6 +13,17 @@ public class MaintenanceService
     }
 
     /// <summary>
+    /// What: smoke-test job, prints the current time every minute.
+    /// Why it's a method (DEVLOG #008): Hangfire stores a job as "method + serialized
+    /// ARGUMENTS". The old inline lambda passed a string built at registration time,
+    /// so every run printed the same timestamp. Here the time is read when the job RUNS.
+    /// </summary>
+    public void Heartbeat()
+    {
+        Console.WriteLine($"Hangfire heartbeat: {DateTimeOffset.Now}");
+    }
+
+    /// <summary>
     /// What: Mark expired invites as Expired.
     /// Why: Invitations shouldn't stay "Pending" forever once ExpiresAtUtc passes.
     /// </summary>

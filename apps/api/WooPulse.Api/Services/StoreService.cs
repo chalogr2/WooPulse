@@ -147,8 +147,13 @@ public class StoreService
         var member = store.Members.SingleOrDefault(m => m.UserSub == sub);
         if (member is null) return Results.NotFound();
 
-        if (!CanWrite(member.Role))
-            return Results.StatusCode(403);
+        // Owner-only (DEVLOG #008). Admins can rename/invite but not delete.
+        // Results.Problem(...) instead of a bare 403 so the UI can show *why*.
+        if (member.Role != StoreRole.Owner)
+            return Results.Problem(
+                title: "Owner only",
+                detail: "Only the store owner can delete a store.",
+                statusCode: 403);
 
         store.IsDeleted = true;
         store.DeletedAtUtc = DateTimeOffset.UtcNow;
@@ -235,6 +240,7 @@ public class StoreService
         return (new InvitationDto(
             inv.Id,
             inv.StoreId,
+            store.Name,
             inv.Email,
             inv.Role.ToString(),
             inv.Status.ToString(),
@@ -243,26 +249,34 @@ public class StoreService
         ), null);
     }
 
-    // What: 
-    // Why: 
+    // What: pending, NOT-yet-expired invites for my email, with the store's name
+    // Why: the hourly "expire-invites" job can lag up to an hour, so we also filter by
+    //      ExpiresAtUtc here. Store name lets the UI show "Acme Shop" instead of "Store #12".
+    // How: .Select(...) runs in SQL, so EF only fetches the columns the DTO needs.
+    //      i.Store.Name follows the navigation property; EF turns it into a JOIN.
     public async Task<List<InvitationDto>> ListMyInvitesAsync(string email)
     {
         var norm = NormalizeEmail(email);
+        var now = DateTimeOffset.UtcNow;
 
-        var rows = await _db.StoreInvitations
-            .Where(i => i.Email == norm && i.Status == InvitationStatus.Pending)
+        return await _db.StoreInvitations
+            .Where(i => i.Email == norm
+                     && i.Status == InvitationStatus.Pending
+                     && (i.ExpiresAtUtc == null || i.ExpiresAtUtc > now))
             .OrderByDescending(i => i.CreatedAtUtc)
+            .Select(i => new InvitationDto(
+                i.Id, i.StoreId, i.Store.Name, i.Email,
+                i.Role.ToString(), i.Status.ToString(),
+                i.CreatedAtUtc, i.ExpiresAtUtc))
             .ToListAsync();
-
-        return rows.Select(i => new InvitationDto(
-            i.Id, i.StoreId, i.Email,
-            i.Role.ToString(), i.Status.ToString(),
-            i.CreatedAtUtc, i.ExpiresAtUtc
-        )).ToList();
     }
 
     // What: accept an invite, add member row + mark invite accepted atomically
-    // Why: two writes must succeed or fail together; explicit tx also prevents TOCTOU on status+membership checks
+    // Why: two writes must succeed or fail together (transaction).
+    // Race safety: a transaction alone does NOT stop two simultaneous accepts. At Postgres's
+    //      default "Read Committed" isolation both requests can read Status == Pending.
+    //      So we "claim" the invite with a conditional UPDATE (see below); only one request
+    //      can flip Pending → Accepted, the other gets 0 rows and a clean 409. (DEVLOG #008)
     public async Task<(StoreDto? store, IResult? error)> AcceptInviteAsync(string sub, string email, string token)
     {
         var normEmail = NormalizeEmail(email);
@@ -285,6 +299,25 @@ public class StoreService
         if (inv.Email != normEmail)
             return (null, Results.StatusCode(403));
 
+        // Atomic claim. ExecuteUpdateAsync sends ONE SQL statement straight to the DB:
+        //   UPDATE "StoreInvitations" SET "Status" = 2, ... WHERE "Id" = @id AND "Status" = 1
+        // If another request already accepted it, Postgres makes us wait for its row lock,
+        // re-checks the WHERE, finds Status = 2, and updates 0 rows.
+        // IgnoreQueryFilters(): we already loaded this invite through the normal filter
+        // (store not deleted), so skipping it keeps the UPDATE a simple single-table statement.
+        var now = DateTimeOffset.UtcNow;
+        var claimed = await _db.StoreInvitations
+            .IgnoreQueryFilters()
+            .Where(i => i.Id == inv.Id && i.Status == InvitationStatus.Pending)
+            .ExecuteUpdateAsync(set => set
+                .SetProperty(i => i.Status, InvitationStatus.Accepted)
+                .SetProperty(i => i.RespondedAtUtc, now)
+                .SetProperty(i => i.RespondedBySub, sub));
+
+        if (claimed == 0)
+            // Returning without CommitAsync → "await using" disposes tx → automatic rollback.
+            return (null, Results.Problem("Invite not pending", "This invite was already used.", statusCode: 409));
+
         var alreadyMember = await _db.StoreMembers.AnyAsync(m => m.StoreId == inv.StoreId && m.UserSub == sub);
 
         if (!alreadyMember)
@@ -294,14 +327,11 @@ public class StoreService
                 StoreId = inv.StoreId,
                 UserSub = sub,
                 Role = inv.Role,
-                CreatedAtUtc = DateTimeOffset.UtcNow
+                CreatedAtUtc = now
             });
         }
 
-        inv.Status = InvitationStatus.Accepted;
-        inv.RespondedAtUtc = DateTimeOffset.UtcNow;
-        inv.RespondedBySub = sub;
-
+        // Invite status was already updated by the claim above; this only inserts the member.
         await _db.SaveChangesAsync();
         await tx.CommitAsync();
 
@@ -309,24 +339,28 @@ public class StoreService
         return (store, null);
     }
 
+    // What: same as ListMyInvitesAsync but includes the token (Development only; this is
+    //       what the local UI's "Accept this invite" button uses, see DEVLOG #002).
     public async Task<List<InvitationDebugDto>> ListMyInvitesDebugAsync(string email)
     {
         email = NormalizeEmail(email);
+        var now = DateTimeOffset.UtcNow;
 
-        var rows = await _db.StoreInvitations
-            .Where(i => i.Email == email && i.Status == InvitationStatus.Pending)
+        return await _db.StoreInvitations
+            .Where(i => i.Email == email
+                     && i.Status == InvitationStatus.Pending
+                     && (i.ExpiresAtUtc == null || i.ExpiresAtUtc > now))
             .OrderByDescending(i => i.CreatedAtUtc)
+            .Select(i => new InvitationDebugDto(
+                i.Id,
+                i.StoreId,
+                i.Store.Name,
+                i.Email,
+                i.Role.ToString(),
+                i.Status.ToString(),
+                i.Token,
+                i.CreatedAtUtc,
+                i.ExpiresAtUtc))
             .ToListAsync();
-
-        return rows.Select(i => new InvitationDebugDto(
-            i.Id,
-            i.StoreId,
-            i.Email,
-            i.Role.ToString(),
-            i.Status.ToString(),
-            i.Token,
-            i.CreatedAtUtc,
-            i.ExpiresAtUtc
-        )).ToList();
     }
 }

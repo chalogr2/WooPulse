@@ -26,9 +26,10 @@ type ApiError = {
 type InvitationDebug = {
   id: number;
   storeId: number;
+  storeName: string;
   email: string;
-  role: number;
-  status: number;
+  role: string;   // API sends enum names: "Admin" | "Member"
+  status: string; // "Pending" | "Accepted" | ...
   token: string;
   createdAtUtc: string;
   expiresAtUtc?: string | null;
@@ -84,9 +85,10 @@ export default function Home() {
   type Invitation = {
   id: number;
   storeId: number;
+  storeName: string;
   email: string;
-  role: number;
-  status: number;
+  role: string;   // API sends enum names: "Admin" | "Member"
+  status: string; // "Pending" | "Accepted" | ...
   createdAtUtc: string;
   expiresAtUtc?: string | null;
   token?: string; // optional (only if your API returns it)
@@ -460,7 +462,7 @@ export default function Home() {
         ) : (
           myInvites.map(i => (
             <div key={i.id} style={{ border: "1px solid #444", padding: 10, borderRadius: 8, marginBottom: 8 }}>
-              <div><b>Invite #{i.id}</b> → Store #{i.storeId}</div>
+              <div><b>Invite #{i.id}</b> → {i.storeName} <span style={{ opacity: 0.7 }}>#{i.storeId}</span></div>
               <div style={{ fontSize: 12, opacity: 0.85 }}>
                 Email: {i.email} | Role: {i.role} | Expires: {i.expiresAtUtc ?? "(none)"}
               </div>
