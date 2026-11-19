@@ -24,7 +24,12 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      {/* suppressHydrationWarning: browser extensions (e.g. ColorZilla adds
+          cz-shortcut-listen="true") edit <body> before React hydrates, which triggers a
+          harmless mismatch warning. This ignores attribute differences on THIS element only;
+          mismatches inside the page are still reported. */}
       <body
+        suppressHydrationWarning
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         {children}

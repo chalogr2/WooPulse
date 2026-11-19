@@ -1,37 +1,19 @@
-import { NextResponse } from "next/server";
-import { auth0 } from "@/lib/auth0";
+import { proxyToApi } from "@/lib/api-proxy";
 
-const API_BASE = process.env.API_BASE_URL!;
+// In Next.js 15+, route params arrive as a Promise, so we "await ctx.params".
+type Ctx = { params: Promise<{ id: string }> };
 
-export async function PUT(req: Request, ctx: { params: Promise<{ id: string }> }) {
-  const { token } = await auth0.getAccessToken();
+// PUT /api/stores/:id -> PUT {API_BASE}/stores/:id   (body: { name })
+export async function PUT(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
-  const body = await req.text();
-
-  const res = await fetch(`${API_BASE}/stores/${id}`, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body,
-  });
-
-  const raw = await res.text();
-  const contentType = res.headers.get("content-type") ?? "";
-  const payload = contentType.includes("application/json") && raw ? JSON.parse(raw) : raw;
-
-  return NextResponse.json(payload, { status: res.status });
+  // encodeURIComponent: the id comes from the URL, so a crafted value like "1/../debug"
+  // could otherwise change which API path we call. Encoding keeps it a single segment.
+  return proxyToApi(`/stores/${encodeURIComponent(id)}`, { method: "PUT", body: await req.text() });
 }
 
-export async function DELETE(_: Request, ctx: { params: Promise<{ id: string }> }) {
-  const { token } = await auth0.getAccessToken();
+// DELETE /api/stores/:id -> DELETE {API_BASE}/stores/:id   (soft delete)
+// "_" is a naming convention for "parameter required by the signature but unused".
+export async function DELETE(_: Request, ctx: Ctx) {
   const { id } = await ctx.params;
-
-  const res = await fetch(`${API_BASE}/stores/${id}`, {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${token}` },
-  });
-
-  return new NextResponse(null, { status: res.status });
+  return proxyToApi(`/stores/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

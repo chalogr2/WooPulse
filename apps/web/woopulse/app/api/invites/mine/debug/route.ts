@@ -1,27 +1,9 @@
-import { NextResponse } from "next/server";
-import { auth0 } from "@/lib/auth0";
+import { isDev, notFound, proxyToApi } from "@/lib/api-proxy";
 
-const API_BASE = process.env.API_BASE_URL!;
-
+// GET /api/invites/mine/debug -> GET {API_BASE}/invites/mine/debug
+// Dev only: returns my pending invites INCLUDING their tokens, which is how the
+// "Accept this invite" button works locally. The API also 404s this outside Development.
 export async function GET() {
-  let token: string;
-  try {
-    ({ token } = await auth0.getAccessToken());
-  } catch {
-    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
-  }
-
-  const upstream = await fetch(`${API_BASE}/invites/mine/debug`, {
-    method: "GET",
-    headers: { Authorization: `Bearer ${token}` },
-    cache: "no-store",
-  });
-
-  const text = await upstream.text();
-  return new NextResponse(text, {
-    status: upstream.status,
-    headers: {
-      "content-type": upstream.headers.get("content-type") ?? "application/json",
-    },
-  });
+  if (!isDev) return notFound();
+  return proxyToApi("/invites/mine/debug");
 }

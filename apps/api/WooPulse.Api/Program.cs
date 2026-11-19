@@ -66,6 +66,12 @@ builder.Services
         };
     });
 
+// What: permission-based policies (they check the Auth0 "permissions" claim).
+// Status: DEFINED but NOT USED by any endpoint (see DEVLOG #007).
+// Why not used: Auth0 gives brand-new users no permissions, so every new signup got 403.
+//      Store access is enforced per store by StoreService (membership + role) instead.
+// To re-enable: change an endpoint's .RequireAuthorization() back to
+//      .RequireAuthorization("stores:read") (or "stores:write" / "stores:delete").
 builder.Services.AddAuthorization(options =>
 {
     options.AddPolicy("stores:read", policy =>
@@ -85,14 +91,29 @@ builder.Services.AddScoped<MaintenanceService>();
 
 var app = builder.Build();
 
+// What: global exception handler, registered FIRST.
+// Why: middleware runs in the order it is added (a pipeline). An exception thrown by
+//      anything registered *before* the handler would never reach it. Putting it first
+//      means every later middleware and endpoint is covered, and the client gets a clean
+//      ProblemDetails JSON (from AddProblemDetails above) instead of a stack trace.
+app.UseExceptionHandler();
+
 app.UseCors("LocalDev");
-app.UseHangfireDashboard("/hangfire", new Hangfire.DashboardOptions
+
+// What: Hangfire dashboard only in Development.
+// Why: the dashboard can trigger/delete jobs. "LocalRequestsOnly" trusts any request that
+//      *looks* local. Behind a reverse proxy, every request looks local. So in any
+//      non-Development environment we don't expose the dashboard at all.
+if (app.Environment.IsDevelopment())
 {
-    Authorization = new[] { new Hangfire.Dashboard.LocalRequestsOnlyAuthorizationFilter() }
-});
+    app.UseHangfireDashboard("/hangfire", new Hangfire.DashboardOptions
+    {
+        Authorization = new[] { new Hangfire.Dashboard.LocalRequestsOnlyAuthorizationFilter() }
+    });
+}
+
 app.UseAuthentication();
 app.UseAuthorization();
-app.UseExceptionHandler();
 
 // Smoke test background job
 RecurringJob.AddOrUpdate(
@@ -187,7 +208,7 @@ app.MapGet("/stores", async (HttpContext ctx, StoreService stores) =>
     var list = await stores.ListAsync(sub);
     return Results.Ok(list);
 })
-.RequireAuthorization("stores:read")
+.RequireAuthorization() // any logged-in user; StoreService checks store membership + role
 .WithName("ListStores");
 
 // Get stores {id}
@@ -198,7 +219,7 @@ app.MapGet("/stores/{id:int}", async (HttpContext ctx, int id, StoreService stor
     var store = await stores.GetAsync(sub, id);
     return store is null ? Results.NotFound() : Results.Ok(store);
 })
-.RequireAuthorization("stores:read")
+.RequireAuthorization() // any logged-in user; StoreService checks store membership + role
 .WithName("GetStore");
 
 
@@ -212,7 +233,7 @@ app.MapPost("/stores", async (HttpContext ctx, CreateStoreRequestDto req, StoreS
 
     return Results.Created($"/stores/{dto!.Id}", dto);
 })
-.RequireAuthorization("stores:write")
+.RequireAuthorization() // any logged-in user; StoreService checks store membership + role
 .WithName("CreateStore");
 
 // Rename store
@@ -225,7 +246,7 @@ app.MapPut("/stores/{id:int}", async (HttpContext ctx, int id, RenameStoreReques
 
     return Results.Ok(dto);
 })
-.RequireAuthorization("stores:write")
+.RequireAuthorization() // any logged-in user; StoreService checks store membership + role
 .WithName("RenameStore");
 
 // Delete store
@@ -238,7 +259,7 @@ app.MapDelete("/stores/{id:int}", async (HttpContext ctx, int id, StoreService s
 
     return Results.NoContent();
 })
-.RequireAuthorization("stores:delete")
+.RequireAuthorization() // any logged-in user; StoreService checks store membership + role
 .WithName("DeleteStore");
 
 // Get deleted stores
@@ -249,7 +270,7 @@ app.MapGet("/stores/deleted", async (HttpContext ctx, StoreService stores) =>
     var deleted = await stores.ListDeletedAsync(sub);
     return Results.Ok(deleted);
 })
-.RequireAuthorization("stores:read")
+.RequireAuthorization() // any logged-in user; StoreService checks store membership + role
 .WithName("ListDeletedStores");
 
 // Get API health
@@ -320,8 +341,12 @@ app.MapPost("/invites/accept", async (HttpContext ctx, AcceptInviteRequestDto re
 .WithName("AcceptInvite");
 
 // Debug claims
+// Same Development-only gate as the other debug/job endpoints below.
 app.MapGet("/debug/claims", (HttpContext ctx) =>
 {
+    if (!app.Environment.IsDevelopment())
+        return Results.NotFound();
+
     var claims = ctx.User.Claims.Select(c => new { c.Type, c.Value }).ToList();
     return Results.Ok(claims);
 })
