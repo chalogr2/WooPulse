@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchJson, toApiError, type ApiError } from "@/lib/client-api";
 
 // Matches Dtos/ConnectionDtos.cs → StoreConnectionDto
@@ -28,6 +28,8 @@ type Props = {
   storeId: number;
   myRole: Role;
   refreshKey: number;
+  /** Called once when a sync finishes, so the page can refresh the analytics. */
+  onSynced?: () => void;
 };
 
 /**
@@ -37,7 +39,7 @@ type Props = {
  *  - The secret field is type="password" and is cleared from state right after saving.
  *  - The API never returns keys, only a hint like "ck_…a1b2".
  */
-export default function ConnectionPanel({ storeId, myRole, refreshKey }: Props) {
+export default function ConnectionPanel({ storeId, myRole, refreshKey, onSynced }: Props) {
   // undefined = still loading, null = not connected, object = connected
   const [conn, setConn] = useState<Connection | null | undefined>(undefined);
   const [editing, setEditing] = useState(false);
@@ -84,6 +86,15 @@ export default function ConnectionPanel({ storeId, myRole, refreshKey }: Props) 
     const timer = setInterval(() => void load(), 3000);
     return () => clearInterval(timer);
   }, [syncing, load]);
+
+  // Detect the moment syncing goes true → false. useRef holds a value across renders
+  // WITHOUT causing a re-render when it changes (unlike useState), which is ideal for
+  // remembering "what was it last time?".
+  const wasSyncing = useRef(false);
+  useEffect(() => {
+    if (wasSyncing.current && !syncing) onSynced?.();
+    wasSyncing.current = syncing;
+  }, [syncing, onSynced]);
 
   const syncNow = async () => {
     setError(null);

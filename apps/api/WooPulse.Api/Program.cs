@@ -52,7 +52,8 @@ app.RegisterWooPulseRecurringJobs();
 app.MapSystemEndpoints();       // /, /health, /me
 app.MapStoreEndpoints();        // /stores...
 app.MapMemberEndpoints();       // /stores/{id}/members..., /stores/{id}/leave
-app.MapConnectionEndpoints();   // /stores/{id}/connection...
+app.MapConnectionEndpoints();   // /stores/{id}/connection..., /stores/{id}/sync
+app.MapAnalyticsEndpoints();    // /stores/{id}/analytics
 app.MapInviteEndpoints();       // /stores/{id}/invites, /invites...
 
 if (app.Environment.IsDevelopment())

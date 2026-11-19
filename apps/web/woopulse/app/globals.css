@@ -3,6 +3,17 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+
+  /* Chart tokens (DEVLOG #013). Charts reference these ROLES, never raw hex, so light/dark
+     swap in one place. Values from the validated reference palette (dataviz guidance). */
+  --viz-series-1: #2a78d6;        /* the one series color (revenue) */
+  --viz-grid: #e8e7e3;            /* hairline gridlines: one step off the surface */
+  --viz-surface: #fcfcfb;         /* card / chart background */
+  --viz-border: #e8e7e3;
+  --viz-text-primary: #0b0b0b;
+  --viz-text-secondary: #52514e;
+  --viz-good: #0ca30c;            /* status: good (always paired with an arrow icon) */
+  --viz-critical: #d03b3b;        /* status: critical */
 }
 
 @theme inline {
@@ -16,6 +27,15 @@
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+
+    /* Dark steps are SELECTED for the dark surface, not an automatic inversion. */
+    --viz-series-1: #3987e5;
+    --viz-grid: #2c2c2a;
+    --viz-surface: #1a1a19;
+    --viz-border: #2c2c2a;
+    --viz-text-primary: #f0efec;
+    --viz-text-secondary: #c3c2b7;
+    /* status colors are fixed (never themed); both clear 3:1 on the dark surface */
   }
 }
 

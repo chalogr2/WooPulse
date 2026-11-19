@@ -5,6 +5,7 @@ import { fetchJson, type ApiError } from "@/lib/client-api";
 import TeamPanel from "@/components/TeamPanel";
 import TrashPanel from "@/components/TrashPanel";
 import ConnectionPanel from "@/components/ConnectionPanel";
+import AnalyticsDashboard from "@/components/AnalyticsDashboard";
 
 type Health = { status: string; utc: string };
 type Store = {
@@ -350,6 +351,9 @@ export default function Home() {
         </select>
       </div>
 
+      {/* Analytics of the active store (components/AnalyticsDashboard.tsx) */}
+      {activeStore && <AnalyticsDashboard storeId={activeStore.id} refreshKey={dataVersion} />}
+
       {/* Invite to active store */}
       <div style={{ border: "1px solid #333", padding: 12, borderRadius: 8, marginBottom: 12 }}>
         <div style={{ fontWeight: 700, marginBottom: 8 }}>Invite member to active store</div>
@@ -395,7 +399,7 @@ export default function Home() {
 
       {/* WooCommerce connection of the active store (components/ConnectionPanel.tsx) */}
       {activeStore && (
-        <ConnectionPanel storeId={activeStore.id} myRole={activeStore.myRole} refreshKey={dataVersion} />
+        <ConnectionPanel storeId={activeStore.id} myRole={activeStore.myRole} refreshKey={dataVersion} onSynced={load} />
       )}
 
       {/* My invites */}

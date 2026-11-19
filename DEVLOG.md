@@ -1008,3 +1008,115 @@ cleanup function** (`clearInterval`), which React runs when syncing stops or the
 2,866 distinct WooCommerce ids (no duplicates), 11,048 order items, currency USD. Statuses:
 1,942 completed ($71,844.48), 922 cancelled ($27,798.30), 2 processing ($36.95). Second run:
 "Synced 76 orders from the last 30 days (0 new)", lock released.
+
+---
+
+### #013 — 2026-11-19 — Step 2C: analytics endpoint + dashboard (Recharts)
+
+**What:** one endpoint that computes the store's numbers in Postgres, and a dashboard showing
+KPI tiles, a revenue chart, top products and orders by status, with range presets
+7D / 30D / 90D / 12M / 3Y. **MVP goal 2 (display analytics) is functionally complete.**
+
+**API: `GET /stores/{storeId}/analytics?from=YYYY-MM-DD&to=YYYY-MM-DD`** (any member;
+`Services/AnalyticsService.cs`, `Dtos/AnalyticsDtos.cs`, `Endpoints/AnalyticsEndpoints.cs`)
+- Defaults to the last 30 days. `from > to` → 400; more than 1,100 days → 400.
+  `DateOnly? from` is bound from the query string by ASP.NET, so invalid dates are rejected automatically.
+- **Revenue statuses** live in ONE constant: `AnalyticsService.RevenueStatuses = { "processing", "completed" }`.
+- Everything the dashboard needs comes back in **one response** (one round trip, one consistent snapshot):
+  - `Current` / `Previous` KPIs. *Previous* = the same number of days right before the range,
+    for "▲ 12% vs previous 30 days".
+    KPIs: Revenue (order totals incl. tax + shipping, like WooCommerce's "Total sales"),
+    NetRevenue (minus tax and shipping), Orders, AverageOrderValue, ItemsSold, CancelledOrders/Value.
+  - `Series`: revenue + orders **per day** (ranges ≤ 92 days) or **per month** (longer),
+    **zero-filled**. A day with no orders must be a 0 point; otherwise the line would bridge the
+    gap and suggest sales that didn't happen.
+  - `TopProducts`: top 10 by revenue, grouped by WooCommerce product id (variations count together).
+  - `Statuses`: count + total for every status (cancelled is shown because it's ~1/3 of orders).
+- **How the SQL works:** each block is one `GROUP BY` query (by status, by day, by product), so
+  Postgres does the summing over thousands of rows and C# only touches a handful of result rows.
+  `OrdersIn(storeId, from, to)` returns an **`IQueryable`**, a query not yet executed, so each
+  caller adds its own `.Where/.GroupBy` and EF still sends a single SQL statement.
+  The `(StoreId, CreatedLocalDate)` index from #012 is what keeps these fast.
+- `SumAsync(i => (int?)i.Quantity) ?? 0`: SQL `SUM` over zero rows is `NULL`, not 0. Summing a
+  nullable lets EF return null, and `?? 0` makes it 0 (otherwise EF throws).
+- No migration needed (read-only over existing tables).
+
+**Frontend**
+- **Recharts `3.10.1`**, pinned exactly (`--save-exact`, no `^`). 3.11.0 was 2 days old, so I used
+  the mature previous release. Supports React 19.
+- `app/api/stores/[id]/analytics/route.ts`: forwards **only** `from` and `to` (an allow-list
+  rebuilt with `URLSearchParams`), never the raw query string.
+- `components/AnalyticsDashboard.tsx`, built with **Tailwind** (first Tailwind component, the
+  style direction for the Step 3 overhaul).
+- `app/globals.css`: **chart color tokens** (`--viz-series-1`, `--viz-grid`, `--viz-surface`,
+  text, good/critical) with separately chosen **dark-mode** values. Components reference roles,
+  never raw hex.
+- `ConnectionPanel` gets `onSynced`: when syncing flips true → false it calls the page's `load()`,
+  so the dashboard refreshes by itself after a sync. It uses `useRef` to remember the previous
+  value without causing re-renders.
+
+**Chart design rules applied** (data-visualization guidance):
+- KPIs are **stat tiles** (label · value, compacted from 10K like `$71.8K` · delta vs previous
+  period). The delta shows **arrow + sign + color**, never color alone. For cancellations "up" is bad (red).
+- Revenue over time = **single-series area chart**: 2px line, ~10% fill, hairline solid horizontal
+  gridlines, no legend (one series; the title names it), crosshair + tooltip with revenue **and**
+  order count. **No dual axis:** orders are in the tooltip/tiles, not on a second y-scale.
+- **"View as table"** toggle: every value is reachable without hovering (accessibility).
+- Top products: thin 8px bars proportional to revenue, value at the end. Statuses: a plain table,
+  since labels carry the meaning.
+
+**A date bug avoided:** `new Date("2026-11-03")` is parsed by JavaScript as **UTC midnight**, which
+in El Salvador (UTC-6) is the evening of Nov 2, so every label would be a day early. `parseLocalDate`
+builds the date from its parts in local time.
+
+**Answer key (computed directly in SQL, for checking the UI)**, last 30 days (2026-10-21 → 2026-11-19):
+57 revenue orders · revenue **$2,378.28** · AOV **$41.72** · 19 cancelled · top product
+"Marcador p/arte OHUHU Kaala, set de 60 L" ($434.50, 11 sold).
+
+**Files:** API new: `Dtos/AnalyticsDtos.cs`, `Services/AnalyticsService.cs`,
+`Endpoints/AnalyticsEndpoints.cs`; changed `Setup/WooCommerceSetup.cs`, `Program.cs`.
+Web new: `components/AnalyticsDashboard.tsx`, `app/api/stores/[id]/analytics/route.ts`; changed
+`app/globals.css`, `components/ConnectionPanel.tsx`, `app/page.tsx`, `package.json` + `pnpm-lock.yaml` (recharts).
+
+**How to verify:**
+- Done: API compiles (0 warnings, 0 errors); `tsc` passes; no new lint problems; SQL answer key above.
+- **Needs you:** restart the API (no migration). The dashboard appears under the store selector.
+  1. 30D tiles match the answer key.
+  2. Switch to 12M / 3Y → the chart switches to monthly points; the deltas update.
+  3. Hover the chart → crosshair + "$X · N orders". "View as table" shows the same numbers.
+  4. Check dark mode (OS setting): colors switch, text stays readable.
+
+---
+
+### #014 — 2026-11-19 — Bug fix: analytics returned 500 ("LINQ expression could not be translated")
+
+**Bug report (owner):** the dashboard showed
+`{"title":"An error occurred while processing your request.","status":500}`.
+
+**How it was found:** instead of guessing, a throwaway console program (in the session's temp
+folder, **not** part of the repo) referenced the API project, created an `AppDbContext` against the
+local database, and called `AnalyticsService.GetAsync` directly. It printed the real exception:
+`InvalidOperationException: The LINQ expression 'DbSet<WooOrderItem>() ... GroupBy(w => w.Outer.WooProductId) ...' could not be translated`.
+(Tip: the same exception is always printed in the **API console** as a `fail:` line. That's the
+first place to look when the UI shows a generic 500.)
+
+**Cause:** in `TopProductsAsync` the query projected each group into the **record constructor**
+`new TopProductDto(...)` and *then* called `.OrderByDescending(p => p.Revenue).Take(10)`. EF Core
+translates LINQ to SQL by tracking what each property means. Through an **anonymous object**
+(`new { Revenue = g.Sum(...) }`) it knows `Revenue` = `SUM("Total")`. Through a **constructor**, it
+can't map `p.Revenue` back to SQL, so anything after it (`OrderBy`, `Take`) is untranslatable. The
+compiler can't catch this; it only fails when the query runs.
+
+**Fix:** project into an anonymous object → `OrderByDescending` + `Take(10)` run in SQL
+(`ORDER BY SUM("Total") DESC LIMIT 10`) → `ToListAsync()` → build the `TopProductDto`s in memory.
+**Rule of thumb:** inside an EF query, only construct DTOs in the *last* step, or use anonymous
+types until the query is materialized.
+
+**Verified (harness against the real data):** 30 days → revenue 2378.28, orders 57, AOV 41.72,
+cancelled 19, top product "Marcador p/arte OHUHU Kaala" $434.50 / 11 sold (**matches the SQL answer
+key in #013**), 30 daily points, 3 statuses. 3 years → granularity "month", 37 points.
+Items sold = 2,686, confirmed in SQL (one line alone was 2,000 sheets of paper).
+
+**Files:** `Services/AnalyticsService.cs`.
+
+**Result:** owner confirmed the dashboard works and looks right. Committed with #013.
