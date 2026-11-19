@@ -19,6 +19,7 @@ builder.Services.AddWooPulseDatabase(builder.Configuration);  // Setup/DatabaseS
 builder.Services.AddWooPulseAuth(builder.Configuration);      // Setup/AuthSetup.cs
 builder.Services.AddWooPulseHangfire(builder.Configuration);  // Setup/HangfireSetup.cs
 builder.Services.AddWooPulseServices();                       // Setup/AppServicesSetup.cs
+builder.Services.AddWooPulseWooCommerce();                    // Setup/WooCommerceSetup.cs
 
 var app = builder.Build();
 
@@ -51,6 +52,7 @@ app.RegisterWooPulseRecurringJobs();
 app.MapSystemEndpoints();       // /, /health, /me
 app.MapStoreEndpoints();        // /stores...
 app.MapMemberEndpoints();       // /stores/{id}/members..., /stores/{id}/leave
+app.MapConnectionEndpoints();   // /stores/{id}/connection...
 app.MapInviteEndpoints();       // /stores/{id}/invites, /invites...
 
 if (app.Environment.IsDevelopment())

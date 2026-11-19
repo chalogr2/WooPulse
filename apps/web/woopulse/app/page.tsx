@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { fetchJson, type ApiError } from "@/lib/client-api";
 import TeamPanel from "@/components/TeamPanel";
 import TrashPanel from "@/components/TrashPanel";
+import ConnectionPanel from "@/components/ConnectionPanel";
 
 type Health = { status: string; utc: string };
 type Store = {
@@ -17,6 +18,7 @@ type Store = {
   isDeleted: boolean;
   deletedAtUtc?: string | null;
   deletedBySub?: string | null;
+  myRole: "Owner" | "Admin" | "Member"; // my role in this store (DEVLOG #011)
 };
 
 type InvitationDebug = {
@@ -255,6 +257,9 @@ export default function Home() {
       .catch(() => setAuth({ loggedIn: false }));
   }, []);
 
+  // Derived value: computed from state on every render, so it never gets out of sync.
+  const activeStore = stores.find((s) => s.id === activeStoreId);
+
   return (
     <main style={{ padding: 24, fontFamily: "system-ui" }}>
       
@@ -386,6 +391,11 @@ export default function Home() {
       {/* Team of the active store (components/TeamPanel.tsx). "cond && <X/>" renders X only if cond is truthy. */}
       {activeStoreId != null && (
         <TeamPanel storeId={activeStoreId} refreshKey={dataVersion} onStoresChanged={load} />
+      )}
+
+      {/* WooCommerce connection of the active store (components/ConnectionPanel.tsx) */}
+      {activeStore && (
+        <ConnectionPanel storeId={activeStore.id} myRole={activeStore.myRole} refreshKey={dataVersion} />
       )}
 
       {/* My invites */}

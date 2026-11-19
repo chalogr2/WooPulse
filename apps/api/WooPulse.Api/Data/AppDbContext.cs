@@ -8,11 +8,25 @@ public class AppDbContext : DbContext
 
     public DbSet<Store> Stores => Set<Store>();
     public DbSet<StoreInvitation> StoreInvitations => Set<StoreInvitation>();
-    public DbSet<StoreMember> StoreMembers => Set<StoreMember>(); 
+    public DbSet<StoreMember> StoreMembers => Set<StoreMember>();
+    public DbSet<StoreConnection> StoreConnections => Set<StoreConnection>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
+
+        // StoreConnection (DEVLOG #011): hidden with its store when soft-deleted,
+        // and at most ONE connection per store (unique index on StoreId).
+        modelBuilder.Entity<StoreConnection>()
+            .HasQueryFilter(c => !c.Store.IsDeleted);
+
+        modelBuilder.Entity<StoreConnection>()
+            .HasIndex(c => c.StoreId)
+            .IsUnique();
+
+        modelBuilder.Entity<StoreConnection>()
+            .Property(c => c.AuthMode)
+            .HasConversion<int>();
 
         modelBuilder.Entity<Store>()
             .HasQueryFilter(s => !s.IsDeleted);

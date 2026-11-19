@@ -13,7 +13,11 @@ public record StoreDto(
 
     bool IsDeleted,
     DateTimeOffset? DeletedAtUtc,
-    string? DeletedBySub
+    string? DeletedBySub,
+
+    // The CALLER's role in this store: "Owner" | "Admin" | "Member" (DEVLOG #011).
+    // Lets the UI decide which buttons to show without asking for the member list.
+    string MyRole
 );
 
 public record CreateStoreRequestDto(string Name);

@@ -27,7 +27,8 @@ public class StoreService
 
     // What: consistent DTO mapping in ONE place
     // Why: prevents mismatched DTO constructor order and avoids EF leakage
-    private static StoreDto ToDto(Store s) =>
+    // myRole: the caller's role in this store (DEVLOG #011)
+    private static StoreDto ToDto(Store s, StoreRole myRole) =>
         new StoreDto(
             s.Id,
             s.Name,
@@ -38,8 +39,27 @@ public class StoreService
             s.UpdatedBySub,
             s.IsDeleted,
             s.DeletedAtUtc,
-            s.DeletedBySub
+            s.DeletedBySub,
+            myRole.ToString()
         );
+
+    // What: query stores together with MY role in each, in one SQL query.
+    // How: the anonymous object { Store, Role } is translated by EF into
+    //      SELECT s.*, (SELECT m.Role FROM StoreMembers m WHERE m.StoreId = s.Id AND m.UserSub = @sub LIMIT 1)
+    //      Then ToDto runs in memory (C#), after the data has arrived.
+    // Callers have already filtered to stores where I'm a member, so First() always finds a row.
+    private static async Task<List<StoreDto>> ToDtosWithRoleAsync(IQueryable<Store> query, string sub)
+    {
+        var rows = await query
+            .Select(s => new
+            {
+                Store = s,
+                Role = s.Members.Where(m => m.UserSub == sub).Select(m => m.Role).First()
+            })
+            .ToListAsync();
+
+        return rows.Select(r => ToDto(r.Store, r.Role)).ToList();
+    }
 
     // Helper for "can write" depending on user membership
     private static bool CanWrite(StoreRole role)
@@ -49,11 +69,11 @@ public class StoreService
     // Why: multi-tenant isolation + no deleted stores by default
     public async Task<List<StoreDto>> ListAsync(string sub)
     {
-        return await _db.Stores
-            .Where(s => s.Members.Any(m => m.UserSub == sub))
-            .OrderByDescending(s => s.Id)
-            .Select(s => ToDto(s))
-            .ToListAsync();
+        return await ToDtosWithRoleAsync(
+            _db.Stores
+                .Where(s => s.Members.Any(m => m.UserSub == sub))
+                .OrderByDescending(s => s.Id),
+            sub);
     }
 
     // What: copy the caller's current email onto all their memberships, if it changed.
@@ -77,10 +97,10 @@ public class StoreService
     // Why: standard CRUD & prevents id-guessing
     public async Task<StoreDto?> GetAsync(string sub, int id)
     {
-        return await _db.Stores
-            .Where(s => s.Id == id && s.Members.Any(m => m.UserSub == sub))
-            .Select(s => ToDto(s))
-            .SingleOrDefaultAsync();
+        var list = await ToDtosWithRoleAsync(
+            _db.Stores.Where(s => s.Id == id && s.Members.Any(m => m.UserSub == sub)),
+            sub);
+        return list.SingleOrDefault();
     }
 
     // What: create store with validation + audit fields
@@ -116,7 +136,7 @@ public class StoreService
         _db.Stores.Add(store);
         await _db.SaveChangesAsync();
 
-        return (ToDto(store), null);
+        return (ToDto(store, StoreRole.Owner), null);   // the creator is the Owner
     }
 
     // What: rename store if owned + validate + set audit fields
@@ -150,7 +170,7 @@ public class StoreService
         store.UpdatedBySub = sub;
 
         await _db.SaveChangesAsync();
-        return (ToDto(store), null);
+        return (ToDto(store, member.Role), null);
     }
 
     // What: soft delete store if owned + audit deletion
@@ -186,12 +206,12 @@ public class StoreService
     // Why: lets UI show a “Trash” view later
     public async Task<List<StoreDto>> ListDeletedAsync(string sub)
     {
-        return await _db.Stores
-            .IgnoreQueryFilters()
-            .Where(s => s.IsDeleted && s.Members.Any(m => m.UserSub == sub))
-            .OrderByDescending(s => s.DeletedAtUtc)
-            .Select(s => ToDto(s))
-            .ToListAsync();
+        return await ToDtosWithRoleAsync(
+            _db.Stores
+                .IgnoreQueryFilters()
+                .Where(s => s.IsDeleted && s.Members.Any(m => m.UserSub == sub))
+                .OrderByDescending(s => s.DeletedAtUtc),
+            sub);
     }
 
     // What: 
@@ -467,6 +487,6 @@ public class StoreService
         store.UpdatedBySub = sub;
 
         await _db.SaveChangesAsync();
-        return (ToDto(store), null);
+        return (ToDto(store, StoreRole.Owner), null);   // only the Owner can restore
     }
 }

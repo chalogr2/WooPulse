@@ -786,3 +786,119 @@ No database migration needed.
      disappears, and the invitee can no longer accept it.
   5. Owner: delete a store → it shows in Trash with "permanently deleted in 30 days" →
      Restore → it's back in the list.
+
+**Result:** confirmed working and code-reviewed by the owner. #009 + #010 committed together
+as `4e7fc7b` (both touched `StoreService.cs`).
+
+---
+
+### #011 — 2026-11-19 — Step 2 design + Step 2A: connect a store to WooCommerce
+
+#### Step 2 design (approved by the owner)
+
+| Decision | Value |
+|---|---|
+| Revenue counts orders with status | **`processing` + `completed`** (WooCommerce Analytics' own default). Excluded: pending, on-hold, cancelled, refunded, failed. Defined in ONE place (Step 2C) so it's a one-line change. |
+| First sync history | All orders, **max 3 years** back |
+| Automatic sync | Every **15 minutes** (Hangfire) |
+| Permissions | Connection: view = any member, save/disconnect = **Owner**, re-test = Owner/Admin. Analytics: any member. **"Sync now": any member.** |
+| Personal data | **Not stored.** No customer names, emails or addresses; only amounts, statuses, dates and products. |
+
+Sub-steps: **2A** connect (this entry) → **2B** order sync → **2C** analytics endpoints + dashboard.
+
+Known limitation of WooCommerce 4.1.1 (affects 2B): the `modified_after` filter only exists from
+WooCommerce 5.8, so incremental sync will re-fetch the last 30 days each run to catch status changes.
+
+#### Step 2A: what was built
+
+**1. `StoreDto.MyRole` (groundwork for the UI).** Every store in API responses now includes the
+caller's role (`"Owner" | "Admin" | "Member"`). `StoreService.ToDtosWithRoleAsync` fetches it
+**in the same SQL query** with a projection to an anonymous object:
+```csharp
+.Select(s => new { Store = s, Role = s.Members.Where(m => m.UserSub == sub).Select(m => m.Role).First() })
+```
+EF turns the `Role = ...` part into a SQL subquery. The mapping to `StoreDto` then happens in C#
+after the data arrives. (Calling a C# method like `ToDto(...)` inside an EF query only works in the
+final projection. Splitting it like this keeps the SQL part fully translatable.)
+
+**2. New table `StoreConnections`** (`Data/StoreConnection.cs`), 1-to-1 with `Store` (unique
+index on `StoreId`), hidden with its store on soft delete (query filter). Columns: `ShopUrl`,
+`ConsumerKeyProtected`, `ConsumerSecretProtected`, `KeyHint` (`ck_…a1b2`), `AuthMode`
+(Header/QueryString), audit fields, last test result. Migration: `AddStoreConnections`.
+
+**3. Encryption of API keys: ASP.NET Core Data Protection** (`Setup/WooCommerceSetup.cs`,
+`Services/ConnectionService.cs`).
+- `IDataProtector.Protect(text)` → an encrypted, tamper-proof string (authenticated
+  encryption: AES-256 + HMAC). `Unprotect(...)` reverses it, only in memory, only when calling
+  WooCommerce.
+- The protector has a **purpose string** `"WooPulse.StoreConnection.v1"`. Data protected for one
+  purpose can't be unprotected with another, which isolates these secrets from anything else.
+- **Where the encryption keys live:** `%LOCALAPPDATA%\ASP.NET\DataProtection-Keys` (Windows
+  default). They are themselves encrypted with **Windows DPAPI**, tied to your Windows account.
+  `SetApplicationName("WooPulse")` keeps them valid if the project folder moves.
+- **If that folder is lost**, saved keys can't be decrypted. The app says
+  "Saved keys unreadable … enter it again" (`CryptographicException` is caught) instead of crashing.
+- Keys are **never returned** by the API, never logged, and the secret input is `type="password"`
+  and cleared from React state right after saving.
+
+**4. `WooCommerceClient`** (`Integrations/WooCommerce/`), a **typed HttpClient** created by
+`IHttpClientFactory` (`services.AddHttpClient<WooCommerceClient>(...)`). The factory pools and
+reuses network connections; `new HttpClient()` per call can run out of sockets.
+- `TestAsync` requests `GET /wp-json/wc/v3/orders?per_page=1` and reads the **`X-WP-Total`**
+  header → "Connected. 1,234 orders found."
+- **Auth fallback:** first `Authorization: Basic base64(key:secret)`. On 401, retry with
+  `consumer_key`/`consumer_secret` as URL parameters (for servers that strip the header, #006).
+  The mode that worked is saved and reused.
+- Errors become actionable messages (401 bad key, 403 missing Read permission, 404 REST API not
+  found / permalinks, timeout, DNS/TLS failure). WooCommerce's own message is appended.
+- 30s timeout and a `User-Agent: WooPulse/0.1` header (some hosts block requests without one).
+- **Security catch:** `HttpClientFactory` logs every request URL at Information level. In
+  query-string mode the URL contains the secret, so **`.RemoveAllLoggers()`** disables that
+  logging for this client.
+- **HTTPS only:** `NormalizeShopUrl` rejects `http://` (keys would travel unencrypted), strips
+  `?query`/`#fragment` and the trailing `/`, and keeps subfolder installs (`https://site.com/shop`).
+
+**5. `ConnectionService` + endpoints** (`Endpoints/ConnectionEndpoints.cs`):
+
+| Route | Who | Notes |
+|---|---|---|
+| `GET /stores/{id}/connection` | any member | **204 No Content** = not connected yet |
+| `PUT /stores/{id}/connection` | Owner | **tests the keys first and only saves if they work**. PUT because there's one connection per store; repeating it gives the same result (idempotent). |
+| `POST /stores/{id}/connection/test` | Owner/Admin | re-test saved keys, store the result |
+| `DELETE /stores/{id}/connection` | Owner | removes the saved keys |
+
+**6. Frontend:** BFF routes `app/api/stores/[id]/connection/route.ts` (GET/PUT/DELETE) and
+`.../connection/test/route.ts` (POST). New `components/ConnectionPanel.tsx`: status (🟢/🔴, URL,
+key hint, last check), buttons by role, and the Owner's connect form with instructions.
+`page.tsx`: `Store.myRole` type, `activeStore` derived value, renders `<ConnectionPanel>`.
+
+**C# syntax introduced:** `key[^4..]` (range: last 4 characters); `catch (...) when (cond)`
+(exception filter); `using (res) { ... }` (dispose the HTTP response to free the connection);
+`(int)res.StatusCode switch { 401 => ..., var s when s >= 500 => ..., _ => ... }`.
+
+**Pre-check against the real shop** (no credentials sent): `GET /wp-json/wc/v3/orders` answered
+**401 `woocommerce_rest_cannot_view`**, so the REST API v3 is reachable at the expected path.
+
+**Files:** API new: `Data/StoreConnection.cs`, `Dtos/ConnectionDtos.cs`,
+`Integrations/WooCommerce/WooCommerceClient.cs`, `Services/ConnectionService.cs`,
+`Endpoints/ConnectionEndpoints.cs`, `Setup/WooCommerceSetup.cs`; changed `Data/AppDbContext.cs`,
+`Dtos/StoreDtos.cs`, `Services/StoreService.cs`, `Program.cs`; migration `AddStoreConnections`.
+Web new: `components/ConnectionPanel.tsx`, 2 route files; changed `app/page.tsx`.
+
+**How to verify:**
+- Done: API compiles (0 warnings, 0 errors); `tsc` passes; no new lint problems.
+- **Needs you:** stop the API, then in `apps/api/WooPulse.Api`:
+  `dotnet ef migrations add AddStoreConnections` and `dotnet ef database update`; restart the API.
+  1. As Owner: the WooCommerce panel shows the form. Paste the shop URL + **Read** key → "Save & test"
+     → 🟢 "Connected. N orders found."
+  2. Try a wrong secret → red error, nothing saved.
+  3. "Test connection" → updates the check time. As a Member: status visible, no buttons.
+  4. Disconnect → the form comes back.
+  5. Optional: in psql, `SELECT "ConsumerSecretProtected" FROM "StoreConnections";` shows
+     `CfDJ8…` (encrypted), not `cs_…`.
+
+**Result:** owner ran the migration and connected the real shop with a new, dedicated Read key:
+*"Connected (the server strips the Authorization header, so keys are sent as URL parameters
+over HTTPS). 5,988 orders found."* This confirms the Plesk header-stripping case predicted in
+#006, so the fallback was needed. DB check: `AuthMode = 2` (QueryString),
+`ConsumerSecretProtected` = `CfDJ8…` (176 chars, encrypted), `KeyHint = ck_…549a`.

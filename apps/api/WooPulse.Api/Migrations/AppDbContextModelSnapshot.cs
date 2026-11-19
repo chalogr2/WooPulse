@@ -65,6 +65,66 @@ namespace WooPulse.Api.Migrations
                     b.ToTable("Stores");
                 });
 
+            modelBuilder.Entity("WooPulse.Api.Data.StoreConnection", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("AuthMode")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ConsumerKeyProtected")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("ConsumerSecretProtected")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBySub")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("KeyHint")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("LastTestMessage")
+                        .HasColumnType("text");
+
+                    b.Property<bool?>("LastTestOk")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTimeOffset?>("LastTestedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ShopUrl")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("StoreId")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedBySub")
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("StoreId")
+                        .IsUnique();
+
+                    b.ToTable("StoreConnections");
+                });
+
             modelBuilder.Entity("WooPulse.Api.Data.StoreInvitation", b =>
                 {
                     b.Property<int>("Id")
@@ -148,6 +208,17 @@ namespace WooPulse.Api.Migrations
                         .IsUnique();
 
                     b.ToTable("StoreMembers");
+                });
+
+            modelBuilder.Entity("WooPulse.Api.Data.StoreConnection", b =>
+                {
+                    b.HasOne("WooPulse.Api.Data.Store", "Store")
+                        .WithMany()
+                        .HasForeignKey("StoreId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Store");
                 });
 
             modelBuilder.Entity("WooPulse.Api.Data.StoreInvitation", b =>
