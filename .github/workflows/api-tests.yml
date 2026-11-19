@@ -1,0 +1,22 @@
+name: API tests
+
+on:
+  push:
+    branches: [main]
+    paths: ["apps/api/**", ".github/workflows/api-tests.yml"]
+  pull_request:
+    paths: ["apps/api/**", ".github/workflows/api-tests.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      # The tests use SQLite in memory: no database, Docker or secrets needed.
+      - run: dotnet test apps/api/WooPulse.sln --configuration Release

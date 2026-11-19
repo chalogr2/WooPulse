@@ -1327,3 +1327,69 @@ data with no customer information and grant no access.
 
 **Files:** `README.md`, `docs/screenshots/dashboard.png`, `docs/screenshots/analytics.png`,
 `docs/screenshots/mystores.png`.
+
+---
+
+### #021 — 2026-11-20 — Automated tests for the API, LICENSE file, CI
+
+**What:** A new xUnit project, `apps/api/WooPulse.Api.Tests`, with 105 tests over every service
+in `Services/` and the WooCommerce client. A `WooPulse.sln` in `apps/api` ties the API and the
+tests together so `dotnet test` works from there. A GitHub Actions workflow runs the tests on
+every push and pull request that touches the API. A root `LICENSE` file (all rights reserved,
+same text as the README's notice). **No business logic was changed.**
+
+**Why:** The README listed "automated tests for the permission rules" as missing, and every
+rule in this app (who can see a store, who can touch the API keys, what counts as revenue) had
+only been checked by hand. Tests make those rules executable: a future change that breaks one
+fails CI instead of reaching a user.
+
+**How:**
+- **Real model, throwaway database.** Each test class gets a private **SQLite in-memory**
+  database created from `AppDbContext` itself (`EnsureCreated`), so the query filters, unique
+  indexes and `ON DELETE CASCADE` foreign keys are the production ones. `Foreign Keys=True` is
+  set explicitly so SQLite enforces cascades like Postgres. Every service call gets a **new
+  DbContext**, like a real request, so nothing is accidentally served from the change tracker.
+- **Two test-only type mappings** (`TestDb.SqliteAppDbContext.ConfigureConventions`): SQLite
+  can't compare or sort `DateTimeOffset`, or SUM / ORDER BY `decimal`, so in tests they're
+  stored as `long` and `double`. Production mappings are untouched.
+- **Fakes, no network:** `FakeWooHandler` is an `HttpMessageHandler` that plays the shop and
+  records every request (so tests can assert the secret never ends up in a URL when header auth
+  works). `FakeJobClient` implements Hangfire's `IBackgroundJobClient` and records enqueued jobs
+  instead of running them. Data Protection uses `EphemeralDataProtectionProvider`; a second
+  instance stands in for "the encryption keys changed".
+- **Hand-checked numbers:** the analytics data set is small and every expected total is worked
+  out in a comment next to the assertion, so a wrong formula can't pass by "looking plausible".
+- `InternalsVisibleTo("WooPulse.Api.Tests")` in the API project, so tests can reach the
+  `internal` helpers (`NormalizeShopUrl`, `TryUnprotect`) without making them public.
+
+**What the tests do NOT cover (on purpose, stated so nobody assumes otherwise):**
+- **Real concurrency.** The race-safety of invite accepts and sync locks comes from Postgres
+  row locks on the conditional `UPDATE ... WHERE Status = Pending`. SQLite can't reproduce two
+  requests racing; the tests check the same statements sequentially (second accept → 409,
+  held lock → sync skipped). A Postgres test container would be the next step.
+- **Postgres `numeric(18,4)`** precision (money is `double` in the test database).
+- **Endpoints, Auth0 JWT validation, the Next.js app.** Only the services and the client.
+
+**Finding (not fixed, needs an owner decision):** in
+`MaintenanceService.PurgeSoftDeletedStoresAsync`, the two "delete dependent rows first (avoid
+FK constraint issues)" statements delete **nothing**: they run with the normal query filters,
+which hide members and invitations of soft-deleted stores, and every store being purged is
+soft-deleted. Purging still works because every foreign key to `Stores` is `ON DELETE CASCADE`
+(checked in the migrations), so Postgres removes members, invitations, the connection and the
+orders with the store. `Purge_HardDeletesStoresInTheTrashForTooLong_WithEverythingThatBelongsToThem`
+confirms that end result. Options: delete the two dead statements and the misleading comment,
+or add `IgnoreQueryFilters()` so they do what the comment says.
+
+**Files:** `apps/api/WooPulse.Api.Tests/` (new), `apps/api/WooPulse.sln` (new),
+`apps/api/WooPulse.Api/WooPulse.Api.csproj` (InternalsVisibleTo), `.github/workflows/api-tests.yml`
+(new), `LICENSE` (new), `README.md` (Tests section, structure, status).
+
+**How to verify:**
+- `cd apps/api && dotnet test` → 105 passed, 0 failed, about 1 second.
+- **The tests were tested.** Five realistic bugs were put into the services one at a time
+  in a single run, then reverted (`git diff` afterwards showed only the `.csproj` change):
+  an Admin allowed to remove anyone, `cancelled` counted as revenue, daily charts using the UTC
+  date instead of the shop's, invites accepted without the email check, the consumer secret
+  saved unencrypted. Result: 8 failing tests, at least one per bug, each named after the rule
+  it protects.
+- Not yet verified: the GitHub Actions run itself (it runs on the first push).
