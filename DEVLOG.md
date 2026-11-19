@@ -1302,3 +1302,28 @@ packages it pulls in (sharp, postcss, nanoid, browserslist, source-map-js); `@au
 fixed ≥ 8.0.3), Newtonsoft.Json 11.0.1 (transitive, high), Microsoft.OpenApi 2.4.1 (via Swashbuckle, high).
 Risk today is low (local-only; the API validates the token on every request regardless of the Next.js
 middleware), but they must be fixed before the app is exposed. **Planned as the next step.**
+
+---
+
+### #020 — 2026-11-19 — Root README + screenshots, repo prepared for public portfolio use
+
+**What:** `README.md` at the repo root, written for recruiters and reviewers: what WooPulse does,
+the architecture diagram, the design decisions worth reviewing, tech stack, project structure,
+setup steps, project status, how it was built (co-authored with Claude as a pair programmer) and
+an **all rights reserved** notice (the repo is public for review only; no license is granted).
+
+**Screenshots** (`docs/screenshots/`), taken by the owner, with personal data (name, email, Auth0
+id, shop URL, key hint, team emails) already blurred:
+- `dashboard.png`: full-width hero image, unchanged.
+- `analytics.png` and `mystores.png`: shown **side by side** in an HTML table. They had different
+  proportions (1768×1640 and 1830×1636), so they would render at different heights. Each was
+  centered **without scaling** on an identical 1830×1640 canvas filled with the page background
+  color (`#0a0a0a`, sampled from the image corner), so both cells render at exactly the same size
+  and the padding is invisible. Done with a small Pillow script outside the repo.
+
+**Owner decision:** the business figures already in this log (revenue totals, order counts, product
+names, last 4 characters of the key hint, hosting panel) may stay public. They are aggregate sales
+data with no customer information and grant no access.
+
+**Files:** `README.md`, `docs/screenshots/dashboard.png`, `docs/screenshots/analytics.png`,
+`docs/screenshots/mystores.png`.
