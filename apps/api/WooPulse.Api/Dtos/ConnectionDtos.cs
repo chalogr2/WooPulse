@@ -9,7 +9,16 @@ public record StoreConnectionDto(
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset? LastTestedAtUtc,
     bool? LastTestOk,
-    string? LastTestMessage
+    string? LastTestMessage,
+
+    // Order sync status (DEVLOG #012)
+    bool SyncInProgress,
+    DateTimeOffset? LastSyncStartedAtUtc,
+    DateTimeOffset? LastSyncCompletedAtUtc,
+    bool? LastSyncOk,
+    string? LastSyncMessage,
+    bool InitialSyncDone,
+    int OrderCount                   // orders currently in OUR database for this store
 );
 
 // Body of PUT /stores/{storeId}/connection (Owner only).

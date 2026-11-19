@@ -902,3 +902,109 @@ Web new: `components/ConnectionPanel.tsx`, 2 route files; changed `app/page.tsx`
 over HTTPS). 5,988 orders found."* This confirms the Plesk header-stripping case predicted in
 #006, so the fallback was needed. DB check: `AuthMode = 2` (QueryString),
 `ConsumerSecretProtected` = `CfDJ8…` (176 chars, encrypted), `KeyHint = ck_…549a`.
+Committed as `867410c`.
+
+---
+
+### #012 — 2026-11-19 — Step 2B: sync WooCommerce orders into our database
+
+**What:** orders (and their product lines) are copied from WooCommerce into two new tables,
+automatically every 15 minutes and on demand with "Sync now". The connection panel shows how many
+orders are synced and a live "syncing…" status.
+
+**Why copy the data?** Analytics (2C) will run SQL over **our** Postgres: fast, independent of how
+slow the shop is, and with no load on the shop for every dashboard view.
+
+**New tables** (`Data/WooOrder.cs`, migration `AddOrdersAndSync`):
+- `Orders`: `WooOrderId` (unique per store, the upsert key), `Number`, `Status`, `Currency`,
+  `Total`, `TotalTax`, `ShippingTotal`, `DiscountTotal`, `CreatedAtUtc`, **`CreatedLocalDate`**,
+  `ModifiedAtUtc`, `SyncedAtUtc`. Indexes: `(StoreId, WooOrderId)` unique, `(StoreId, CreatedLocalDate)`.
+- `OrderItems`: `WooProductId`, `WooVariationId`, `Name`, `Quantity`, `Total`.
+- **No customer data** (no names, emails, addresses). Analytics doesn't need them.
+- Money is `decimal` → `numeric(18,4)`. Never `double` for money: binary floating point can't
+  represent 0.1 exactly.
+- `CreatedLocalDate` is a `DateOnly` (Postgres `date`) taken from WooCommerce's `date_created`, which
+  is in the **shop's** time zone. Daily charts group by it, so a late-evening order lands on the
+  right day.
+- `StoreConnections` gained the sync state: `SyncLockedUntilUtc`, `LastSyncStartedAtUtc`,
+  `LastSyncCompletedAtUtc`, `LastSyncOk`, `LastSyncMessage`, `InitialSyncCompletedAtUtc`.
+
+**How the sync works** (`Services/SyncService.cs`):
+```
+"Sync now" (any member) ─┐
+every 15 min ────────────┴→ Hangfire job SyncStoreAsync(storeId)
+                              1. claim lock        UPDATE ... SET SyncLockedUntilUtc = now+30min
+                                                   WHERE SyncLockedUntilUtc IS NULL OR < now
+                              2. decrypt API key   (ConnectionService.TryUnprotect)
+                              3. fetch pages       GET /orders?after=…&per_page=100&page=N&order=asc
+                              4. upsert each page  insert new / update existing, replace line items
+                              5. record result     message + LastSyncOk, release lock
+```
+- **Window:** first sync = 3 years back (`InitialHistoryYears`). After that, only the last 30 days
+  (`IncrementalWindowDays`). WooCommerce 4.1 has no `modified_after` filter (added in 5.8), so
+  re-reading a recent window is how we catch status changes (processing → completed/refunded).
+  If the first sync fails halfway, `InitialSyncCompletedAtUtc` stays null and the next run redoes
+  the full history, which is safe because saving is an upsert.
+- **Lock:** the same "claim with a conditional UPDATE" pattern as accepting invites (#008). The
+  15-minute job and a "Sync now" click can't run the same store twice in parallel. The lock
+  *expires* after 30 minutes, so a crash can't leave it stuck forever.
+- **Background, not in the request:** the first sync of 5,988 orders is ~60 API calls. "Sync now"
+  returns **202 Accepted** ("queued") immediately; the UI polls `GET /connection` every 3 seconds.
+- **Upsert per page, efficiently:** one query loads the existing orders of the page into a
+  `Dictionary` (`WHERE WooOrderId = ANY(@ids)`), one `SaveChangesAsync` writes the page (one
+  transaction), then `ChangeTracker.Clear()` frees memory so EF doesn't track thousands of objects.
+- **Line items** are replaced on update: `o.Items.Clear()` makes EF delete the old rows (orphans
+  of a required relationship), then the current ones are added.
+- **Errors** are caught and **recorded** (shown as ⚠️ in the UI). `[AutomaticRetry(Attempts = 0)]`
+  turns off Hangfire's 10 automatic retries: the next 15-minute run is the retry.
+- **Recurring job** `sync-woocommerce` (`"*/15 * * * *"`) calls `EnqueueAllAsync`, which only
+  **queues one job per connected store**, so stores sync independently.
+- **JSON mapping** (`Integrations/WooCommerce/WooOrderJson.cs`): WooCommerce's shape is kept
+  separate from our entity. `JsonNamingPolicy.SnakeCaseLower` maps `date_created_gmt` ↔
+  `DateCreatedGmt`; `JsonNumberHandling.AllowReadingFromString` parses money sent as `"123.45"`.
+  `_gmt` dates are marked UTC with `DateTime.SpecifyKind`; product names are HTML-decoded
+  (`&amp;` → `&`).
+
+**Connection changes** (`Services/ConnectionService.cs`):
+- Saving a connection **queues the first sync automatically**.
+- **Disconnect deletes the synced orders too**, and saving a **different shop URL** wipes the old
+  orders and resets the sync state, so two shops' data can never mix. (New keys for the same URL
+  keep the data.)
+- `ConnectionService` queues jobs through `IBackgroundJobClient`, not `SyncService`, because
+  `SyncService` depends on `ConnectionService`. Two services that need each other are a
+  **circular dependency**, which DI can't construct.
+- `StoreConnectionDto` gained `SyncInProgress`, `LastSync*`, `InitialSyncDone`, `OrderCount`.
+- New endpoint `POST /stores/{storeId}/sync` (any member) → 202, or 409 if a sync is already running.
+
+**Frontend:** `app/api/stores/[id]/sync/route.ts`; `ConnectionPanel` shows "N orders synced",
+⏳ syncing… / ✅ / ⚠️ with the last message, and a "Sync now" button for every member.
+**Polling** = a `useEffect` that starts `setInterval(load, 3000)` while syncing and **returns a
+cleanup function** (`clearInterval`), which React runs when syncing stops or the panel unmounts.
+
+**Known limitations (acceptable for MVP):**
+- Orders moved to the **trash** in WooCommerce aren't returned by the API, so a trashed order keeps
+  its last synced status here.
+- Status changes on orders **older than 30 days** aren't picked up after the first sync
+  (e.g. a refund on a 3-month-old order). Disconnect + reconnect does a fresh full sync.
+
+**Files:** API new: `Data/WooOrder.cs`, `Integrations/WooCommerce/WooOrderJson.cs`,
+`Services/SyncService.cs`; changed: `Data/StoreConnection.cs`, `Data/AppDbContext.cs`,
+`Integrations/WooCommerce/WooCommerceClient.cs` (`GetOrdersPageAsync`), `Services/ConnectionService.cs`,
+`Dtos/ConnectionDtos.cs`, `Endpoints/ConnectionEndpoints.cs`, `Setup/WooCommerceSetup.cs`,
+`Setup/HangfireSetup.cs`. Web new: `app/api/stores/[id]/sync/route.ts`; changed `components/ConnectionPanel.tsx`.
+
+**How to verify:**
+- Done: API compiles (0 warnings, 0 errors); `tsc` passes; no new lint problems.
+- **Needs you:** stop the API, then `dotnet ef migrations add AddOrdersAndSync` and
+  `dotnet ef database update`; restart the API.
+  1. The panel shows "0 orders synced". Click **Sync now** → ⏳ and the count climbs every few
+     seconds → ✅ "Full sync done: N orders (N new)."
+  2. Click **Sync now** again → ✅ "Synced N orders from the last 30 days (0 new)." No duplicates.
+  3. `/hangfire` → Recurring jobs shows `sync-woocommerce` every 15 minutes.
+  4. Optional psql: `SELECT "Status", count(*) FROM "Orders" GROUP BY 1;`
+
+**Result:** owner ran the migration and synced the real shop. DB check: **2,866 orders**
+(2023-11-20 → 2026-11-18, exactly the 3-year window; the other ~3,100 of the 5,988 are older),
+2,866 distinct WooCommerce ids (no duplicates), 11,048 order items, currency USD. Statuses:
+1,942 completed ($71,844.48), 922 cancelled ($27,798.30), 2 processing ($36.95). Second run:
+"Synced 76 orders from the last 30 days (0 new)", lock released.

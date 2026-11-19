@@ -12,6 +12,14 @@ type Connection = {
   lastTestedAtUtc: string | null;
   lastTestOk: boolean | null;
   lastTestMessage: string | null;
+  // sync status (DEVLOG #012)
+  syncInProgress: boolean;
+  lastSyncStartedAtUtc: string | null;
+  lastSyncCompletedAtUtc: string | null;
+  lastSyncOk: boolean | null;
+  lastSyncMessage: string | null;
+  initialSyncDone: boolean;
+  orderCount: number;
 };
 
 type Role = "Owner" | "Admin" | "Member";
@@ -38,6 +46,9 @@ export default function ConnectionPanel({ storeId, myRole, refreshKey }: Props) 
   const [consumerSecret, setConsumerSecret] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
+  // When we asked for a sync (ms timestamp). Used to keep polling until that sync finishes,
+  // even in the second before the background job has actually started.
+  const [syncRequestedAt, setSyncRequestedAt] = useState<number | null>(null);
 
   const isOwner = myRole === "Owner";
   const canTest = myRole === "Owner" || myRole === "Admin";
@@ -57,6 +68,32 @@ export default function ConnectionPanel({ storeId, myRole, refreshKey }: Props) 
     setEditing(false);
     void load();
   }, [load, refreshKey]);
+
+  // Is a sync running or about to run? (derived from state; no extra useState needed)
+  const waitingForRequestedSync =
+    syncRequestedAt != null &&
+    (!conn?.lastSyncCompletedAtUtc || Date.parse(conn.lastSyncCompletedAtUtc) < syncRequestedAt);
+  const syncing = !!conn?.syncInProgress || waitingForRequestedSync;
+  //              ^ "!!" turns any value into a plain true/false
+
+  // POLLING: while syncing, reload the status every 3 seconds so the order count climbs live.
+  // The cleanup function (returned) stops the timer when syncing ends or the panel unmounts;
+  // without it, timers would pile up and keep running.
+  useEffect(() => {
+    if (!syncing) return;
+    const timer = setInterval(() => void load(), 3000);
+    return () => clearInterval(timer);
+  }, [syncing, load]);
+
+  const syncNow = async () => {
+    setError(null);
+    try {
+      await fetchJson(`/api/stores/${storeId}/sync`, { method: "POST" });
+      setSyncRequestedAt(Date.now());
+    } catch (e) {
+      setError(toApiError(e));
+    }
+  };
 
   async function run(action: () => Promise<Connection | undefined>) {
     setBusy(true);
@@ -82,6 +119,8 @@ export default function ConnectionPanel({ storeId, myRole, refreshKey }: Props) 
       // Don't keep secrets in browser memory longer than needed.
       setConsumerKey("");
       setConsumerSecret("");
+      // Saving queues the first sync automatically (ConnectionService), so start watching it.
+      setSyncRequestedAt(Date.now());
       return result;
     });
 
@@ -89,7 +128,7 @@ export default function ConnectionPanel({ storeId, myRole, refreshKey }: Props) 
     run(() => fetchJson<Connection>(`/api/stores/${storeId}/connection/test`, { method: "POST" }));
 
   const disconnect = () => {
-    if (!confirm("Disconnect this store from WooCommerce? The saved API key will be deleted.")) return;
+    if (!confirm("Disconnect this store from WooCommerce? The saved API key AND all synced orders will be deleted from WooPulse (your shop is not affected).")) return;
     void run(async () => {
       await fetchJson(`/api/stores/${storeId}/connection`, { method: "DELETE" });
       return undefined; // → conn becomes null (not connected)
@@ -127,7 +166,26 @@ export default function ConnectionPanel({ storeId, myRole, refreshKey }: Props) 
             {conn.lastTestMessage}
             {conn.lastTestedAtUtc && ` (checked ${new Date(conn.lastTestedAtUtc).toLocaleString()})`}
           </div>
+          {/* Sync status */}
+          <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid #333" }}>
+            <div>
+              <b>{conn.orderCount.toLocaleString()}</b> orders synced
+              {syncing && <span> · ⏳ syncing…{!conn.initialSyncDone && " (first full sync, this can take a few minutes)"}</span>}
+            </div>
+            {!syncing && conn.lastSyncMessage && (
+              <div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>
+                {conn.lastSyncOk ? "✅" : "⚠️"} {conn.lastSyncMessage}
+                {conn.lastSyncCompletedAtUtc && ` (${new Date(conn.lastSyncCompletedAtUtc).toLocaleString()})`}
+              </div>
+            )}
+            {!syncing && !conn.lastSyncMessage && (
+              <div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>Not synced yet.</div>
+            )}
+          </div>
+
           <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            {/* Any member can sync (owner decision #011) */}
+            <button disabled={busy || syncing} onClick={syncNow}>{syncing ? "Syncing…" : "Sync now"}</button>
             {canTest && <button disabled={busy} onClick={test}>{busy ? "Testing…" : "Test connection"}</button>}
             {isOwner && <button disabled={busy} onClick={startEditing}>Change keys</button>}
             {isOwner && <button disabled={busy} onClick={disconnect}>Disconnect</button>}

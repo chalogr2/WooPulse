@@ -65,6 +65,11 @@ public static class HangfireSetup
         jobs.AddOrUpdate<MaintenanceService>("heartbeat", svc => svc.Heartbeat(), Cron.Minutely());
         jobs.AddOrUpdate<MaintenanceService>("expire-invites", svc => svc.ExpireInvitesAsync(), Cron.Hourly());
         jobs.AddOrUpdate<MaintenanceService>("purge-soft-deleted-stores", svc => svc.PurgeSoftDeletedStoresAsync(30), Cron.Daily());
+
+        // Every 15 minutes (owner decision #011). Cron: "*/15 * * * *" = minute 0,15,30,45 of every hour.
+        // This job only QUEUES one SyncStoreAsync job per connected store (SyncService.EnqueueAllAsync),
+        // so stores sync independently and one slow shop doesn't delay the others.
+        jobs.AddOrUpdate<SyncService>("sync-woocommerce", svc => svc.EnqueueAllAsync(), "*/15 * * * *");
         return app;
     }
 }

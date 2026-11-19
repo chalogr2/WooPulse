@@ -35,6 +35,7 @@ public static class WooCommerceSetup
             .RemoveAllLoggers();
 
         services.AddScoped<ConnectionService>();
+        services.AddScoped<SyncService>();
         return services;
     }
 }

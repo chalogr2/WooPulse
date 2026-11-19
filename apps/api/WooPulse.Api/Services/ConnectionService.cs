@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using Hangfire;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using WooPulse.Api.Data;
@@ -29,17 +30,42 @@ public class ConnectionService
     private readonly AppDbContext _db;
     private readonly WooCommerceClient _woo;
     private readonly IDataProtector _protector;
+    private readonly IBackgroundJobClient _jobs;
 
-    public ConnectionService(AppDbContext db, WooCommerceClient woo, IDataProtectionProvider dataProtection)
+    // IBackgroundJobClient (not SyncService) to queue the first sync: SyncService already
+    // depends on ConnectionService, and DI can't build two services that need each other
+    // (a circular dependency). Queuing the job by type avoids that.
+    public ConnectionService(AppDbContext db, WooCommerceClient woo, IDataProtectionProvider dataProtection,
+                             IBackgroundJobClient jobs)
     {
         _db = db;
         _woo = woo;
         _protector = dataProtection.CreateProtector("WooPulse.StoreConnection.v1");
+        _jobs = jobs;
     }
 
-    private static StoreConnectionDto ToDto(StoreConnection c) => new(
-        c.ShopUrl, c.KeyHint, c.AuthMode.ToString(), c.CreatedAtUtc,
-        c.LastTestedAtUtc, c.LastTestOk, c.LastTestMessage);
+    // Async because it also counts the store's synced orders (one COUNT query).
+    private async Task<StoreConnectionDto> ToDtoAsync(StoreConnection c)
+    {
+        var orderCount = await _db.Orders.CountAsync(o => o.StoreId == c.StoreId);
+        return new StoreConnectionDto(
+            c.ShopUrl, c.KeyHint, c.AuthMode.ToString(), c.CreatedAtUtc,
+            c.LastTestedAtUtc, c.LastTestOk, c.LastTestMessage,
+            SyncInProgress: c.SyncLockedUntilUtc > DateTimeOffset.UtcNow,   // named argument, for readability
+            c.LastSyncStartedAtUtc, c.LastSyncCompletedAtUtc, c.LastSyncOk, c.LastSyncMessage,
+            InitialSyncDone: c.InitialSyncCompletedAtUtc is not null,
+            orderCount);
+    }
+
+    /// <summary>
+    /// Delete this store's synced orders (their items go too: the DB foreign key cascades).
+    /// Used on disconnect and when the shop URL changes, so data from two shops never mixes.
+    /// </summary>
+    private Task DeleteSyncedOrdersAsync(int storeId)
+        => _db.Orders.IgnoreQueryFilters().Where(o => o.StoreId == storeId).ExecuteDeleteAsync();
+
+    private void EnqueueSync(int storeId)
+        => _jobs.Enqueue<SyncService>(s => s.SyncStoreAsync(storeId, CancellationToken.None));
 
     /// <summary>
     /// "https://Shop.com/" → "https://Shop.com". Null if not an absolute HTTPS URL.
@@ -60,7 +86,7 @@ public class ConnectionService
         if (me is null) return (null, Results.NotFound());
 
         var c = await _db.StoreConnections.SingleOrDefaultAsync(x => x.StoreId == storeId);
-        return (c is null ? null : ToDto(c), null);   // (null, null) = member, but not connected yet
+        return (c is null ? null : await ToDtoAsync(c), null);   // (null, null) = member, but not connected yet
     }
 
     /// <summary>
@@ -100,6 +126,17 @@ public class ConnectionService
         {
             c.UpdatedAtUtc = now;
             c.UpdatedBySub = sub;
+
+            // Different shop? Its orders aren't this shop's orders: wipe them and start over.
+            // (Same URL with new keys keeps the synced data.)
+            if (c.ShopUrl != shopUrl)
+            {
+                await DeleteSyncedOrdersAsync(storeId);
+                c.InitialSyncCompletedAtUtc = null;
+                c.LastSyncCompletedAtUtc = null;
+                c.LastSyncOk = null;
+                c.LastSyncMessage = null;
+            }
         }
 
         c.ShopUrl = shopUrl;
@@ -112,7 +149,11 @@ public class ConnectionService
         c.LastTestMessage = test.Message;
 
         await _db.SaveChangesAsync();
-        return (ToDto(c), null);
+
+        // Start syncing right away, so data appears without anyone clicking "Sync now".
+        EnqueueSync(storeId);
+
+        return (await ToDtoAsync(c), null);
     }
 
     /// <summary>Re-test the saved credentials (e.g. after changing something in WordPress).</summary>
@@ -138,7 +179,7 @@ public class ConnectionService
         if (test.AuthMode is not null) c.AuthMode = test.AuthMode.Value;   // the server's behavior may have changed
 
         await _db.SaveChangesAsync();
-        return (ToDto(c), null);
+        return (await ToDtoAsync(c), null);
     }
 
     public async Task<IResult?> DeleteAsync(string sub, int storeId)
@@ -151,6 +192,8 @@ public class ConnectionService
         var c = await _db.StoreConnections.SingleOrDefaultAsync(x => x.StoreId == storeId);
         if (c is null) return Results.NotFound();
 
+        // Disconnect = remove the keys AND the synced orders (DEVLOG #012).
+        await DeleteSyncedOrdersAsync(storeId);
         _db.StoreConnections.Remove(c);
         await _db.SaveChangesAsync();
         return null;
@@ -159,7 +202,7 @@ public class ConnectionService
     /// <summary>
     /// Decrypt saved credentials. Returns null if they can't be decrypted, which happens
     /// if the Data Protection key folder was deleted or the app moved to another machine.
-    /// Will be used by the order sync (Step 2B) too.
+    /// Also used by SyncService.
     /// </summary>
     internal WooCredentials? TryUnprotect(StoreConnection c)
     {

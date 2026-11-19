@@ -57,6 +57,18 @@ public static class ConnectionEndpoints
         })
         .WithName("DeleteConnection");
 
+        // POST /stores/{storeId}/sync: "Sync now" (any member, owner decision #011).
+        // Returns 202 Accepted = "queued, not finished yet". The UI polls GET /connection
+        // to watch SyncInProgress / OrderCount change.
+        app.MapPost("/stores/{storeId:int}/sync", async (ClaimsPrincipal user, int storeId, SyncService sync) =>
+        {
+            var sub = user.GetSub();
+            if (sub is null) return Results.Unauthorized();
+            return await sync.RequestSyncAsync(sub, storeId);
+        })
+        .RequireAuthorization()
+        .WithName("SyncStore");
+
         return app;
     }
 }

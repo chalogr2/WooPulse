@@ -91,9 +91,24 @@ namespace WooPulse.Api.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<DateTimeOffset?>("InitialSyncCompletedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("KeyHint")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<DateTimeOffset?>("LastSyncCompletedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastSyncMessage")
+                        .HasColumnType("text");
+
+                    b.Property<bool?>("LastSyncOk")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTimeOffset?>("LastSyncStartedAtUtc")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("LastTestMessage")
                         .HasColumnType("text");
@@ -110,6 +125,9 @@ namespace WooPulse.Api.Migrations
 
                     b.Property<int>("StoreId")
                         .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset?>("SyncLockedUntilUtc")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTimeOffset?>("UpdatedAtUtc")
                         .HasColumnType("timestamp with time zone");
@@ -210,6 +228,105 @@ namespace WooPulse.Api.Migrations
                     b.ToTable("StoreMembers");
                 });
 
+            modelBuilder.Entity("WooPulse.Api.Data.WooOrder", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateOnly>("CreatedLocalDate")
+                        .HasColumnType("date");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<decimal>("DiscountTotal")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<DateTimeOffset?>("ModifiedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Number")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<decimal>("ShippingTotal")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("StoreId")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("SyncedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<decimal>("Total")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<decimal>("TotalTax")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<long>("WooOrderId")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("StoreId", "CreatedLocalDate");
+
+                    b.HasIndex("StoreId", "WooOrderId")
+                        .IsUnique();
+
+                    b.ToTable("Orders");
+                });
+
+            modelBuilder.Entity("WooPulse.Api.Data.WooOrderItem", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("OrderId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("Total")
+                        .HasPrecision(18, 4)
+                        .HasColumnType("numeric(18,4)");
+
+                    b.Property<long>("WooProductId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("WooVariationId")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrderId");
+
+                    b.ToTable("OrderItems");
+                });
+
             modelBuilder.Entity("WooPulse.Api.Data.StoreConnection", b =>
                 {
                     b.HasOne("WooPulse.Api.Data.Store", "Store")
@@ -243,9 +360,36 @@ namespace WooPulse.Api.Migrations
                     b.Navigation("Store");
                 });
 
+            modelBuilder.Entity("WooPulse.Api.Data.WooOrder", b =>
+                {
+                    b.HasOne("WooPulse.Api.Data.Store", "Store")
+                        .WithMany()
+                        .HasForeignKey("StoreId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Store");
+                });
+
+            modelBuilder.Entity("WooPulse.Api.Data.WooOrderItem", b =>
+                {
+                    b.HasOne("WooPulse.Api.Data.WooOrder", "Order")
+                        .WithMany("Items")
+                        .HasForeignKey("OrderId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Order");
+                });
+
             modelBuilder.Entity("WooPulse.Api.Data.Store", b =>
                 {
                     b.Navigation("Members");
+                });
+
+            modelBuilder.Entity("WooPulse.Api.Data.WooOrder", b =>
+                {
+                    b.Navigation("Items");
                 });
 #pragma warning restore 612, 618
         }

@@ -10,10 +10,37 @@ public class AppDbContext : DbContext
     public DbSet<StoreInvitation> StoreInvitations => Set<StoreInvitation>();
     public DbSet<StoreMember> StoreMembers => Set<StoreMember>();
     public DbSet<StoreConnection> StoreConnections => Set<StoreConnection>();
+    public DbSet<WooOrder> Orders => Set<WooOrder>();
+    public DbSet<WooOrderItem> OrderItems => Set<WooOrderItem>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
+
+        // Orders (DEVLOG #012). Entity<T>(e => { ... }) groups all config for one entity.
+        modelBuilder.Entity<WooOrder>(e =>
+        {
+            e.HasQueryFilter(o => !o.Store.IsDeleted);
+
+            // Upsert key: one row per WooCommerce order per store.
+            e.HasIndex(o => new { o.StoreId, o.WooOrderId }).IsUnique();
+            // Analytics queries filter by store + date range, so this index makes them fast.
+            e.HasIndex(o => new { o.StoreId, o.CreatedLocalDate });
+
+            // numeric(18,4): exact decimal with up to 4 decimal places in Postgres.
+            e.Property(o => o.Total).HasPrecision(18, 4);
+            e.Property(o => o.TotalTax).HasPrecision(18, 4);
+            e.Property(o => o.ShippingTotal).HasPrecision(18, 4);
+            e.Property(o => o.DiscountTotal).HasPrecision(18, 4);
+        });
+
+        modelBuilder.Entity<WooOrderItem>(e =>
+        {
+            // Matching filter on the child, so EF doesn't warn about an item whose
+            // (filtered-out) order is missing.
+            e.HasQueryFilter(i => !i.Order.Store.IsDeleted);
+            e.Property(i => i.Total).HasPrecision(18, 4);
+        });
 
         // StoreConnection (DEVLOG #011): hidden with its store when soft-deleted,
         // and at most ONE connection per store (unique index on StoreId).

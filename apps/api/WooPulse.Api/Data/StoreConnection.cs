@@ -48,4 +48,25 @@ public class StoreConnection
     public DateTimeOffset? LastTestedAtUtc { get; set; }
     public bool? LastTestOk { get; set; }
     public string? LastTestMessage { get; set; }
+
+    // ---- Order sync state (DEVLOG #012) ----
+
+    /// <summary>
+    /// Sync lock. A sync may only start if this is null or in the past; it sets it to
+    /// now + 30 min (the "claim", same pattern as accepting invites) and clears it when done.
+    /// If the API crashes mid-sync, the lock simply expires after 30 minutes.
+    /// </summary>
+    public DateTimeOffset? SyncLockedUntilUtc { get; set; }
+
+    public DateTimeOffset? LastSyncStartedAtUtc { get; set; }
+    public DateTimeOffset? LastSyncCompletedAtUtc { get; set; }   // set on success AND failure ("finished at")
+    public bool? LastSyncOk { get; set; }
+    public string? LastSyncMessage { get; set; }
+
+    /// <summary>
+    /// Null until the first full (3-year) sync finishes. After that, syncs only re-fetch
+    /// the last 30 days. If the first sync fails halfway, it stays null, so the next run
+    /// redoes the full history (safe, because saving is an upsert).
+    /// </summary>
+    public DateTimeOffset? InitialSyncCompletedAtUtc { get; set; }
 }

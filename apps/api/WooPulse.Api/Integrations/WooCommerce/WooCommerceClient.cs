@@ -1,7 +1,9 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using WooPulse.Api.Data;
 
 namespace WooPulse.Api.Integrations.WooCommerce;
@@ -25,7 +27,45 @@ public class WooCommerceClient
 {
     private readonly HttpClient _http;
 
+    // "static readonly": created once and shared. JsonSerializerOptions caches metadata
+    // internally, so reusing one instance is much faster than creating it per call.
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,      // DateCreatedGmt ↔ date_created_gmt
+        NumberHandling = JsonNumberHandling.AllowReadingFromString,  // "123.45" → 123.45m
+    };
+
     public WooCommerceClient(HttpClient http) => _http = http;
+
+    /// <summary>
+    /// One page (max 100) of orders created after <paramref name="createdAfter"/>, oldest first.
+    /// Returns the orders and the total number of pages (from the "X-WP-TotalPages" header).
+    /// Throws WooApiException with a readable message if WooCommerce answers with an error.
+    /// status is not sent, so WooCommerce's default "any" applies: all statuses except trashed.
+    /// </summary>
+    public async Task<(List<WooOrderJson> Orders, int TotalPages)> GetOrdersPageAsync(
+        WooCredentials creds, DateTimeOffset createdAfter, int page, CancellationToken ct)
+    {
+        var query = new Dictionary<string, string>
+        {
+            ["per_page"] = "100",   // WooCommerce's maximum
+            ["page"] = page.ToString(),
+            ["orderby"] = "date",
+            ["order"] = "asc",      // oldest first: new orders arriving mid-sync land on later pages
+            ["after"] = createdAfter.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss"),
+        };
+
+        using var res = await SendAsync(creds, "orders", query, ct);
+        if (!res.IsSuccessStatusCode)
+            throw new WooApiException(await DescribeErrorAsync(res, creds.ShopUrl, ct));
+
+        var totalPages = res.Headers.TryGetValues("X-WP-TotalPages", out var values)
+                         && int.TryParse(values.FirstOrDefault(), out var n) ? n : 1;
+
+        // ReadFromJsonAsync: stream the body straight into objects (System.Net.Http.Json).
+        var orders = await res.Content.ReadFromJsonAsync<List<WooOrderJson>>(JsonOptions, ct) ?? new();
+        return (orders, totalPages);
+    }
 
     /// <summary>
     /// Tries the credentials by asking for 1 order. WooCommerce returns the total order count
